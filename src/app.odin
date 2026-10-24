@@ -106,25 +106,25 @@ NAV_DEFS := [3]struct {
 }
 
 top_bar :: proc() {
-	if _, ok := niello.begin(topbar_u); ok {
-		niello.show(logo_u)
+	if _, ok := niello.begin(top.bar); ok {
+		niello.show(top.logo)
 		for def, i in NAV_DEFS {
 			selected := app.screen == def.screen
 			instances.nav[i] = nav_button(def.key, def.label, selected)
 		}
-		if _, ok2 := niello.begin(spacer_u); ok2 {}
-		niello.show(sync_label_u, 0, {text = app.sync_status})
+		if _, ok2 := niello.begin(top.spacer); ok2 {}
+		niello.show(top.sync_label, 0, {text = app.sync_status})
 		instances.sync = nav_button("sync", "Sync", false)
 		instances.settings = nav_button("settings", "Settings", false)
 	}
 }
 
 nav_button :: proc(key: string, label: string, selected: bool) -> niello.Instance {
-	i, open := niello.begin(nav_u, niello.key(key), {variant = selected ? sel_u : niello.NO_UNIT})
+	i, open := niello.begin(top.nav, niello.key(key), {variant = selected ? common.sel : niello.NO_UNIT})
 	if open {
-		niello.show(nav_label_u, 0, {
+		niello.show(top.nav_label, 0, {
 			text = label,
-			variant = selected ? label_sel_u : niello.NO_UNIT,
+			variant = selected ? common.label_sel : niello.NO_UNIT,
 		})
 	}
 	return i
@@ -133,10 +133,10 @@ nav_button :: proc(key: string, label: string, selected: bool) -> niello.Instanc
 // ---- screens ------------------------------------------------------------------
 
 screen_now_playing :: proc() {
-	if _, ok := niello.begin(np_col_u); ok {
-		niello.show(np_cover_u)
-		niello.show(np_title_u)
-		niello.show(np_artist_u)
+	if _, ok := niello.begin(np.col); ok {
+		niello.show(np.cover)
+		niello.show(np.title)
+		niello.show(np.artist)
 	}
 }
 
@@ -159,22 +159,22 @@ SECTION_DEFS := [11]struct {
 }
 
 screen_library :: proc() {
-	if _, ok := niello.begin(lib_row_u); ok {
-		if _, ok2 := niello.begin(sidebar_u); ok2 {
+	if _, ok := niello.begin(lib.row); ok {
+		if _, ok2 := niello.begin(lib.sidebar); ok2 {
 			for def, i in SECTION_DEFS {
 				selected := app.section == def.section
-				inst, open := niello.begin(section_u, niello.key(def.key), {variant = selected ? sel_u : niello.NO_UNIT})
+				inst, open := niello.begin(lib.section, niello.key(def.key), {variant = selected ? common.sel : niello.NO_UNIT})
 				instances.section[i] = inst
 				if open {
-					niello.show(section_label_u, 0, {
+					niello.show(lib.section_label, 0, {
 						text = def.label,
-						variant = selected ? label_sel_u : niello.NO_UNIT,
+						variant = selected ? common.label_sel : niello.NO_UNIT,
 					})
 				}
 			}
 		}
-		if _, ok3 := niello.begin(lib_panel_u); ok3 {
-			niello.show(placeholder_u, 0, {
+		if _, ok3 := niello.begin(lib.panel); ok3 {
+			niello.show(lib.placeholder, 0, {
 				text = "No collections yet — the library arrives in step 3.\nFolders and sync land in steps 2 and 6.",
 			})
 		}
@@ -182,58 +182,58 @@ screen_library :: proc() {
 }
 
 screen_composer :: proc() {
-	if _, ok := niello.begin(lib_row_u, niello.key("composer")); ok {
+	if _, ok := niello.begin(lib.row, niello.key("composer")); ok {
 		tray("tray_in", "Input — drop chips here")
 		tray("tray_all", "Has All — and")
 		tray("tray_none", "Has None — not")
-		if _, ok2 := niello.begin(lib_panel_u); ok2 {
-			niello.show(placeholder_u, 0, {text = "Matching songs — the Composer arrives in step 5."})
+		if _, ok2 := niello.begin(lib.panel); ok2 {
+			niello.show(lib.placeholder, 0, {text = "Matching songs — the Composer arrives in step 5."})
 		}
 	}
 }
 
 tray :: proc(key: string, title: string) {
-	if _, ok := niello.begin(tray_u, niello.key(key)); ok {
-		niello.show(tray_title_u, 0, {text = title})
+	if _, ok := niello.begin(comp.tray, niello.key(key)); ok {
+		niello.show(comp.tray_title, 0, {text = title})
 	}
 }
 
 // ---- playback bar ---------------------------------------------------------------
 
 play_bar :: proc() {
-	if _, ok := niello.begin(bar_u); ok {
+	if _, ok := niello.begin(pb.bar); ok {
 		instances.prev = transport_button("prev", "Prev")
 		{
-			i, open := niello.begin(play_u, niello.key("play"))
+			i, open := niello.begin(pb.play, niello.key("play"))
 			instances.play = i
 			if open {
-				niello.show(play_label_u, 0, {text = app.playing ? "Pause" : "Play"})
+				niello.show(pb.play_label, 0, {text = app.playing ? "Pause" : "Play"})
 			}
 		}
 		instances.next = transport_button("next", "Next")
-		if _, ok2 := niello.begin(pb_info_u); ok2 {
-			niello.show(pb_title_u)
-			niello.show(pb_artist_u)
+		if _, ok2 := niello.begin(pb.info); ok2 {
+			niello.show(pb.title)
+			niello.show(pb.artist)
 		}
-		if _, ok3 := niello.begin(seek_track_u); ok3 {
+		if _, ok3 := niello.begin(pb.seek_track); ok3 {
 			// The fill is a singleton unit, so its fraction is a
 			// per-frame unit write (With carries content, not size).
 			pct := app.position_secs / FAKE_TRACK_SECS
-			niello.set(seek_fill_u, niello.Field.Size, niello.Size{niello.percent(pct), niello.percent(1)})
-			niello.show(seek_fill_u)
+			niello.set(pb.seek_fill, niello.Field.Size, niello.Size{niello.percent(pct), niello.percent(1)})
+			niello.show(pb.seek_fill)
 		}
-		niello.show(time_u, 0, {text = fmt.tprintf("%s / %s", fmt_time(app.position_secs), fmt_time(FAKE_TRACK_SECS))})
-		if _, ok4 := niello.begin(vol_track_u); ok4 {
-			niello.show(vol_fill_u)
+		niello.show(pb.time, 0, {text = fmt.tprintf("%s / %s", fmt_time(app.position_secs), fmt_time(FAKE_TRACK_SECS))})
+		if _, ok4 := niello.begin(pb.vol_track); ok4 {
+			niello.show(pb.vol_fill)
 		}
 		instances.queue = transport_button("queue", "Queue")
 	}
 }
 
 transport_button :: proc(key: string, label: string) -> niello.Instance {
-	i, open := niello.begin(tbtn_u, niello.key(key))
+	i, open := niello.begin(pb.tbtn, niello.key(key))
 	if open {
-		niello.show(tbtn_label_u, 0, {text = label})
+		niello.show(pb.tbtn_label, 0, {text = label})
 	}
 	return i
 }
@@ -246,11 +246,11 @@ fmt_time :: proc(secs: f32) -> string {
 // ---- settings popup --------------------------------------------------------------
 
 settings_popup :: proc() {
-	pi, open := niello.begin_popup(popup_u, 0, niello.Placement.Center, {modal = true}, key = niello.key("settings_popup"))
+	pi, open := niello.begin_popup(pop.panel, 0, niello.Placement.Center, {modal = true}, key = niello.key("settings_popup"))
 	instances.popup = pi
 	if open {
-		niello.show(popup_title_u)
-		niello.show(placeholder_u, 0, {text = "Music folders live here in step 6."})
+		niello.show(pop.title)
+		niello.show(lib.placeholder, 0, {text = "Music folders live here in step 6."})
 		instances.popup_close = nav_button("popup_close", "Close", false)
 	}
 }
