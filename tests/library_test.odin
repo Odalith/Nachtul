@@ -20,8 +20,13 @@ test_collections_page :: proc(t: ^testing.T) {
 	nachtul.db_create_schema(db)
 	seed_library(db)
 	// Give the album a thumbnail blob (the shared seed leaves them
-	// NULL) — hex for "JPEGDATA".
+	// NULL) — hex for "JPEGDATA". And give s-1 a large song thumbnail
+	// ("SONG"): the album's own blob must win for the album, and the
+	// playlist (which contains s-1 and has no blob of its own) must
+	// fall back to the song's — the real library's shape, where only
+	// playlists carry collection thumbnails and every song has one.
 	nachtul.db_exec(db, "UPDATE Collections SET thumbnail = x'4A50454744415441' WHERE uuid = 'c-album';")
+	nachtul.db_exec(db, "UPDATE Songs SET largeThumbnail = x'534F4E47' WHERE uuid = 's-1';")
 
 	base := nachtul.Lib_Query{section = .All, sort = .None, page = 0, page_size = 30}
 	rows, total := nachtul.collections_page(db, base)
@@ -39,6 +44,12 @@ test_collections_page :: proc(t: ^testing.T) {
 	pl.section = .Playlists
 	rows, total = nachtul.collections_page(db, pl)
 	testing.expect(t, total == 1 && rows[0].uuid == "c-list", "playlists section filters")
+	testing.expect(t, rows[0].has_thumbnail, "playlist resolves art from its first song")
+	if thumb, tok := rows[0].thumbnail.?; tok {
+		testing.expect(t, string(thumb) == "SONG", "fallback thumbnail is the song's large thumb")
+	} else {
+		testing.expect(t, false, "fallback thumbnail present")
+	}
 
 	cols := base
 	cols.section = .Collections

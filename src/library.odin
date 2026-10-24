@@ -104,7 +104,14 @@ scan_collection :: proc(stmt: Stmt) -> Collection_Row {
 	}
 }
 
-COLLECTION_COLS :: "uuid, typeEnum, name, addedAt, lastOpened, (thumbnail IS NOT NULL)"
+// A collection's display art: its own thumbnail when set (playlists
+// carry one — GOOber in the real library is the only collection that
+// does), else the large thumbnail of its first song by position —
+// every song in the real library carries one. Resolved in SQL so
+// cards and the collection header agree (D1).
+RESOLVED_THUMB :: "COALESCE(thumbnail, (SELECT s2.largeThumbnail FROM CollectionSongs cs2 JOIN Songs s2 ON s2.uuid = cs2.songUuid_fk WHERE cs2.collectionUuid_fk = Collections.uuid ORDER BY cs2.position LIMIT 1))"
+
+COLLECTION_COLS :: "uuid, typeEnum, name, addedAt, lastOpened, (" + RESOLVED_THUMB + " IS NOT NULL)"
 
 collections_run :: proc(db: Db, sql: string, limit: int) -> []Collection_Row {
 	stmt, ok := stmt_prepare(db, sql)
@@ -699,7 +706,7 @@ lib_worker :: proc(_: rawptr) {
 }
 
 collection_by_uuid :: proc(db: Db, uuid: string) -> (Collection_Row, bool) {
-	stmt, ok := stmt_prepare(db, "SELECT " + COLLECTION_COLS + ", thumbnail FROM Collections WHERE uuid = ?1;")
+	stmt, ok := stmt_prepare(db, "SELECT " + COLLECTION_COLS + ", " + RESOLVED_THUMB + " FROM Collections WHERE uuid = ?1;")
 	if !ok {
 		return {}, false
 	}
@@ -809,7 +816,7 @@ collections_page :: proc(db: Db, q: Lib_Query) -> ([]Collection_Row, int) {
 	}
 
 	page_sql := fmt.tprintf(`
-		SELECT c.uuid, c.typeEnum, c.name, c.addedAt, c.lastOpened, (c.thumbnail IS NOT NULL), c.thumbnail
+		SELECT c.uuid, c.typeEnum, c.name, c.addedAt, c.lastOpened, (COALESCE(c.thumbnail, (SELECT s2.largeThumbnail FROM CollectionSongs cs2 JOIN Songs s2 ON s2.uuid = cs2.songUuid_fk WHERE cs2.collectionUuid_fk = c.uuid ORDER BY cs2.position LIMIT 1)) IS NOT NULL), COALESCE(c.thumbnail, (SELECT s2.largeThumbnail FROM CollectionSongs cs2 JOIN Songs s2 ON s2.uuid = cs2.songUuid_fk WHERE cs2.collectionUuid_fk = c.uuid ORDER BY cs2.position LIMIT 1))
 		FROM Collections c
 		LEFT JOIN (
 			SELECT cs.collectionUuid_fk AS cid,
