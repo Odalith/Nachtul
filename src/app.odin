@@ -42,7 +42,7 @@ App :: struct {
 	sync_status:      string,
 	// Library state, landed by the loader through the inbox (step 2).
 	loaded:           bool,
-	folders:          []Folder,
+	folders:          [dynamic]Folder,
 	folder_count:     int,
 	collection_count: int,
 	song_count:       int,
@@ -54,12 +54,12 @@ App :: struct {
 	lib_query:      Lib_Query,
 	lib_sent:       Lib_Query,
 	lib_sent_gen:   u64,
-	lib_rows:       []Collection_Row,
+	lib_rows:       [dynamic]Collection_Row,
 	lib_total:      int,
 	lib_loaded:     bool,
 	open_uuid:      string,
 	open_row:       Collection_Row,
-	open_songs:     []Song_Row,
+	open_songs:     [dynamic]Song_Row,
 	open_loaded:    bool,
 	open_art:       niello.Image,
 	open_art_owned: bool,
@@ -465,21 +465,37 @@ artists_join :: proc(json: string) -> string {
 	return out
 }
 
+// close_collection frees everything the open collection owns: the
+// song rows, the header row's cloned strings + thumbnail blob, and
+// the two cloned uuid strings below. The len guards match the free
+// helpers: an empty string may be a literal, never a clone.
 close_collection :: proc() {
 	if app.open_art_owned && int(app.open_art) != 0 {
 		niello.image_release(app.open_art)
 	}
 	app.open_art = 0
 	app.open_art_owned = false
+	if len(app.open_uuid) > 0 {
+		delete(app.open_uuid)
+	}
 	app.open_uuid = ""
 	app.open_loaded = false
+	free_song_rows(app.open_songs)
 	app.open_songs = nil
+	free_collection_row(&app.open_row)
+	app.open_row = Collection_Row{}
+	if len(app.selected_song) > 0 {
+		delete(app.selected_song)
+	}
 	app.selected_song = ""
 }
 
 open_collection :: proc(uuid: string) {
 	close_collection()
-	app.open_uuid = uuid
+	// A CLONE, not the row's string: the page that supplied uuid can
+	// be freed (page turn, search) while this collection is open, and
+	// drain matches incoming songs against open_uuid.
+	app.open_uuid = strings.clone(uuid)
 	request_songs(uuid)
 }
 
@@ -616,7 +632,12 @@ dispatch :: proc() {
 		}
 		for inst, idx in song_row_insts {
 			if idx < len(app.open_songs) && niello.clicked(inst) {
-				app.selected_song = app.open_songs[idx].uuid
+				// A clone, like open_uuid: the song rows can be
+				// freed (close, reopen) while the selection lives.
+				if len(app.selected_song) > 0 {
+					delete(app.selected_song)
+				}
+				app.selected_song = strings.clone(app.open_songs[idx].uuid)
 				break
 			}
 		}

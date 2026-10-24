@@ -78,7 +78,12 @@ folder_add :: proc(db: Db, path: string) -> bool {
 	return true
 }
 
-folders_list :: proc(db: Db) -> []Folder {
+// Row sets that cross the inbox are [dynamic], not slices: a slice
+// cannot be deleted back to its backing array, so the old slice
+// shape leaked the array itself on every overwrite (5,000 song rows
+// is ~500KB of backing alone). The frame thread owns a set once it
+// lands and frees it with free_*_rows below — never the worker.
+folders_list :: proc(db: Db) -> [dynamic]Folder {
 	stmt, ok := stmt_prepare(db, "SELECT folderPath, addedAt FROM Folders ORDER BY addedAt;")
 	if !ok {
 		return nil
@@ -88,7 +93,7 @@ folders_list :: proc(db: Db) -> []Folder {
 	for stmt_step(stmt) {
 		append(&out, Folder{path = col_text(stmt, 0), added_at = col_i64(stmt, 1)})
 	}
-	return out[:]
+	return out
 }
 
 // ---- collections -------------------------------------------------------------------
@@ -165,7 +170,7 @@ collection_touch_opened :: proc(db: Db, uuid: string) {
 
 // ---- songs ---------------------------------------------------------------------------
 
-songs_from_collection :: proc(db: Db, collection_uuid: string) -> []Song_Row {
+songs_from_collection :: proc(db: Db, collection_uuid: string) -> [dynamic]Song_Row {
 	stmt, ok := stmt_prepare(db, `
 		SELECT s.uuid, s.title, s.artists, s.location, s.fileName, s.duration, s.sizeInBytes, cs.position
 		FROM CollectionSongs cs JOIN Songs s ON s.uuid = cs.songUuid_fk
@@ -189,7 +194,7 @@ songs_from_collection :: proc(db: Db, collection_uuid: string) -> []Song_Row {
 			position = col_i64(stmt, 7),
 		})
 	}
-	return out[:]
+	return out
 }
 
 // A token search, D1-style: the query IS the search. The term is
@@ -559,7 +564,7 @@ Msg :: union {
 }
 
 Library_Loaded :: struct {
-	folders:          []Folder,
+	folders:          [dynamic]Folder,
 	folder_count:     int,
 	collection_count: int,
 	song_count:       int,
@@ -572,12 +577,12 @@ Collections_Page :: struct {
 	query: Lib_Query,
 	gen:   u64, // data_generation at fetch time
 	total: int,
-	rows:  []Collection_Row,
+	rows:  [dynamic]Collection_Row,
 }
 
 Collection_Songs :: struct {
 	collection: Collection_Row,
-	rows:       []Song_Row,
+	rows:       [dynamic]Song_Row,
 }
 
 Job :: union {
@@ -628,8 +633,13 @@ request_collections :: proc(q: Lib_Query) {
 	post_job(Job_Collections{query = q})
 }
 
+// The queued job OWNS its uuid: request_songs clones it, and the
+// worker deletes it after the songs case runs. The clone is what
+// makes freeing lib_rows safe — the old code passed the row's own
+// uuid string into the queue, so freeing the page while the job was
+// still queued would have left the worker holding a freed string.
 request_songs :: proc(collection_uuid: string) {
-	post_job(Job_Songs{collection_uuid = collection_uuid})
+	post_job(Job_Songs{collection_uuid = strings.clone(collection_uuid)})
 }
 
 start_library_load :: proc(ctx: ^niello.Context, dir: string) {
@@ -643,7 +653,21 @@ start_library_load :: proc(ctx: ^niello.Context, dir: string) {
 	page_thumbs = make(map[string]niello.Image)
 	box = inbox.create(Msg, ctx)
 	box_ready = true
-	load_thread = thread.create_and_start_with_data(nil, lib_worker)
+	// The worker MUST run under the caller's context, not the default
+	// one: row ownership crosses threads (the worker allocates row
+	// strings/blobs, the frame thread frees them, and vice versa for
+	// the queued job uuid), and an allocation freed under a different
+	// allocator than it was made under is corruption, not a leak.
+	// The default thread context is the heap; the headless suite's
+	// thread context is a tracking allocator over a rollback arena,
+	// and freeing an arena pointer with the heap allocator hung the
+	// flow test after the first songs job (no crash, just a worker
+	// that never made progress again). With the caller's context,
+	// both sides share one allocator — heap in the app, the test
+	// tracker in the suite, where the frees then show up as tracked
+	// instead of bad frees. Temp stays safe: _select_context_for_thread
+	// swaps a default temp allocator to the global one for the child.
+	load_thread = thread.create_and_start_with_data(nil, lib_worker, context)
 	post_job(Job_Load{})
 }
 
@@ -699,6 +723,9 @@ lib_worker :: proc(_: rawptr) {
 			if found {
 				inbox.send(&box, Collection_Songs{collection = row, rows = songs_from_collection(db, j.collection_uuid)})
 			}
+			// The job's uuid is a clone owned by the queue (see
+			// request_songs); it dies here, after its last use.
+			delete(j.collection_uuid)
 		case Job_Quit:
 			return
 		}
@@ -743,7 +770,7 @@ Lib_Query :: struct {
 // One page of collections for a query, thumbnails included, plus the
 // total match count. Sorting by Size/Duration/Tag_Count/Popular is
 // aggregate SQL over CollectionSongs — the query IS the feature (D1).
-collections_page :: proc(db: Db, q: Lib_Query) -> ([]Collection_Row, int) {
+collections_page :: proc(db: Db, q: Lib_Query) -> ([dynamic]Collection_Row, int) {
 	cond := strings.builder_make()
 	defer strings.builder_destroy(&cond)
 	strings.write_string(&cond, " WHERE 1 = 1")
@@ -843,7 +870,7 @@ collections_page :: proc(db: Db, q: Lib_Query) -> ([]Collection_Row, int) {
 		row.thumbnail = col_blob_clone(stmt, 6)
 		append(&out, row)
 	}
-	return out[:], total
+	return out, total
 }
 
 // ---- apply (frame thread) --------------------------------------------------------------
@@ -855,11 +882,94 @@ drain_scratch: [dynamic]Msg
 // deliberately small).
 page_thumbs: map[string]niello.Image
 
-apply_page_thumbs :: proc(rows: []Collection_Row) {
-	for uuid, img in page_thumbs {
+// Row ownership, fixed 2026-10-24: every row set that crosses the
+// inbox is heap-owned (col_text clones every string, col_blob_clone
+// copies every thumbnail blob), and the frame thread owns it once it
+// lands. The old code overwrote app.lib_rows / app.open_songs and
+// dropped stale pages without freeing anything, so every page turn,
+// search keystroke and collection open/close leaked a page of strings
+// plus a page of ~9KB thumbnail blobs. The free_* helpers below are
+// the only way a landed set dies: before an overwrite, on a stale
+// drop, and in close_collection. String deletes are guarded on len:
+// an empty string may be a literal, and deleting a literal is not a
+// free at all.
+// A single row (open_row) has owned fields but no backing array, so
+// free_collection_row frees the fields and zeroes the row; the
+// plural helpers free every row's fields, then the backing array.
+// Freeing a set is only safe because nothing else borrows it by
+// then: open_uuid and selected_song are clones (see app.odin), the
+// thumb map is released first (its keys borrow row uuids), and a
+// queued Job_Songs carries a cloned uuid (see request_songs).
+free_collection_row :: proc(row: ^Collection_Row) {
+	if len(row.uuid) > 0 {
+		delete(row.uuid)
+	}
+	if len(row.name) > 0 {
+		delete(row.name)
+	}
+	if thumb, ok := row.thumbnail.?; ok && len(thumb) > 0 {
+		delete(thumb)
+	}
+	row^ = Collection_Row{}
+}
+
+free_collection_rows :: proc(rows: [dynamic]Collection_Row) {
+	if rows == nil {
+		return
+	}
+	for &row in rows {
+		free_collection_row(&row)
+	}
+	delete(rows)
+}
+
+free_song_rows :: proc(rows: [dynamic]Song_Row) {
+	if rows == nil {
+		return
+	}
+	for &row in rows {
+		if len(row.uuid) > 0 {
+			delete(row.uuid)
+		}
+		if len(row.title) > 0 {
+			delete(row.title)
+		}
+		if len(row.artists) > 0 {
+			delete(row.artists)
+		}
+		if len(row.location) > 0 {
+			delete(row.location)
+		}
+		if len(row.file_name) > 0 {
+			delete(row.file_name)
+		}
+	}
+	delete(rows)
+}
+
+free_folders :: proc(folders: [dynamic]Folder) {
+	if folders == nil {
+		return
+	}
+	for &f in folders {
+		if len(f.path) > 0 {
+			delete(f.path)
+		}
+	}
+	delete(folders)
+}
+
+// release_page_thumbs drops the decoded page images and clears the
+// map. Run it BEFORE freeing the old page rows: the map's keys
+// borrow those rows' uuid strings.
+release_page_thumbs :: proc() {
+	for _, img in page_thumbs {
 		niello.image_release(img)
 	}
 	clear(&page_thumbs)
+}
+
+apply_page_thumbs :: proc(rows: [dynamic]Collection_Row) {
 	for &row in rows {
 		if thumb, ok := row.thumbnail.?; ok {
 			if img, iok := niello.image_load_memory(thumb, 168, 168); iok {
@@ -879,6 +989,7 @@ drain_library_msgs :: proc() {
 	for msg in drain_scratch {
 		switch m in msg {
 		case Library_Loaded:
+			free_folders(app.folders)
 			app.folders = m.folders
 			app.folder_count = m.folder_count
 			app.collection_count = m.collection_count
@@ -894,13 +1005,19 @@ drain_library_msgs :: proc() {
 			// only the page we last asked for, at the current data
 			// generation, applies.
 			if m.query == app.lib_query && m.gen == app.lib_sent_gen {
+				release_page_thumbs()
+				free_collection_rows(app.lib_rows)
 				app.lib_rows = m.rows
 				app.lib_total = m.total
 				app.lib_loaded = true
 				apply_page_thumbs(m.rows)
+			} else {
+				free_collection_rows(m.rows)
 			}
 		case Collection_Songs:
 			if m.collection.uuid == app.open_uuid {
+				free_song_rows(app.open_songs)
+				free_collection_row(&app.open_row)
 				app.open_row = m.collection
 				app.open_songs = m.rows
 				app.open_loaded = true
@@ -912,6 +1029,10 @@ drain_library_msgs :: proc() {
 						app.open_art_owned = true
 					}
 				}
+			} else {
+				col := m.collection
+				free_collection_row(&col)
+				free_song_rows(m.rows)
 			}
 		}
 	}

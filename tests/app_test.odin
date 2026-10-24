@@ -16,6 +16,25 @@ setup :: proc() {
 }
 
 teardown :: proc() {
+	// The app legitimately holds the last page / open collection at
+	// test end; free them here so a flow test's tracking report
+	// reflects the lifecycle (overwrite / drop / close frees), not
+	// the final held set. These are tracked frees, not bad frees:
+	// start_library_load passes the caller's context to the worker,
+	// so worker allocations land in this thread's tracking map.
+	// Order is safe: every test stops the library (defer, LIFO)
+	// before teardown runs, and no declare runs after teardown.
+	nachtul.free_collection_rows(nachtul.app.lib_rows)
+	nachtul.free_song_rows(nachtul.app.open_songs)
+	nachtul.free_collection_row(&nachtul.app.open_row)
+	nachtul.free_folders(nachtul.app.folders)
+	if len(nachtul.app.open_uuid) > 0 {
+		delete(nachtul.app.open_uuid)
+	}
+	if len(nachtul.app.selected_song) > 0 {
+		delete(nachtul.app.selected_song)
+	}
+	nachtul.app = nachtul.App{}
 	niello.test_teardown()
 }
 

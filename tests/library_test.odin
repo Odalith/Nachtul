@@ -4,6 +4,7 @@ package tests
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "core:time"
 
@@ -203,4 +204,48 @@ test_library_flow :: proc(t: ^testing.T) {
 	}
 	settle(2)
 	testing.expect(t, wait_for(back_to_three), "clearing the search restores the page")
+}
+
+// The row free helpers, on same-thread allocations: they must run
+// clean under the test tracking allocator (no double free, no bad
+// free) and leave a single row zeroed. The flow test above covers
+// the drain paths (overwrite, back/close, search re-page); this
+// pins the helpers themselves.
+@(test)
+test_free_rows_helpers :: proc(t: ^testing.T) {
+	rows: [dynamic]nachtul.Collection_Row
+	append(&rows, nachtul.Collection_Row{
+		uuid = strings.clone("c-1"),
+		name = strings.clone("One"),
+		thumbnail = make([]u8, 4),
+	})
+	append(&rows, nachtul.Collection_Row{
+		uuid = strings.clone("c-2"),
+		name = strings.clone("Two"),
+	})
+	songs: [dynamic]nachtul.Song_Row
+	append(&songs, nachtul.Song_Row{
+		uuid = strings.clone("s-1"),
+		title = strings.clone("Song"),
+		artists = strings.clone("[]"),
+		location = strings.clone("/x"),
+		file_name = strings.clone("x.mp3"),
+	})
+	folders: [dynamic]nachtul.Folder
+	append(&folders, nachtul.Folder{path = strings.clone("/music")})
+	nachtul.free_collection_rows(rows)
+	nachtul.free_song_rows(songs)
+	nachtul.free_folders(folders)
+	// A single row frees its fields and zeroes itself, so a second
+	// free through close_collection-style reuse is a no-op, not a
+	// double free.
+	row := nachtul.Collection_Row{
+		uuid = strings.clone("c-3"),
+		name = strings.clone("Three"),
+		thumbnail = make([]u8, 2),
+	}
+	nachtul.free_collection_row(&row)
+	testing.expect(t, row.uuid == "" && row.name == "" && row.thumbnail == nil,
+		"a freed single row is zeroed")
+	nachtul.free_collection_row(&row)
 }
