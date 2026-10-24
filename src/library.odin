@@ -980,16 +980,16 @@ free_folders :: proc(folders: [dynamic]Folder) {
     delete(folders)
 }
 
-apply_page_thumbs :: proc(rows: []Collection_Row) {
-	prof_begin("apply_page_thumbs")
-	defer prof_end()
-	for uuid, img in page_thumbs {
+release_page_thumbs :: proc() {
+	for _, img in page_thumbs {
 		niello.image_release(img)
 	}
 	clear(&page_thumbs)
 }
 
 apply_page_thumbs :: proc(rows: [dynamic]Collection_Row) {
+	prof_begin("apply_page_thumbs")
+	defer prof_end()
 	for &row in rows {
 		if thumb, ok := row.thumbnail.?; ok {
 			if img, iok := niello.image_load_memory(thumb, 168, 168); iok {
@@ -1021,17 +1021,23 @@ drain_library_msgs :: proc() {
 				app.sync_status = fmt.tprintf("Imported %d songs from NachtulV1.db", m.import_songs)
 			}
 		case Collections_Page:
-			// Stale pages (an older query's answer landing late) drop:
-			// only the page we last asked for, at the current data
-			// generation, applies.
+		// Stale pages (an older query's answer landing late) drop:
+		// only the page we last asked for, at the current data
+		// generation, applies.
 			if m.query == app.lib_query && m.gen == app.lib_sent_gen {
+				release_page_thumbs()
+				free_collection_rows(app.lib_rows)
 				app.lib_rows = m.rows
 				app.lib_total = m.total
 				app.lib_loaded = true
 				apply_page_thumbs(m.rows)
+			} else {
+				free_collection_rows(m.rows)
 			}
 		case Collection_Songs:
 			if m.collection.uuid == app.open_uuid {
+				free_song_rows(app.open_songs)
+				free_collection_row(&app.open_row)
 				app.open_row = m.collection
 				app.open_songs = m.rows
 				app.open_loaded = true
@@ -1043,6 +1049,10 @@ drain_library_msgs :: proc() {
 						app.open_art_owned = true
 					}
 				}
+			} else {
+				col := m.collection
+				free_collection_row(&col)
+				free_song_rows(m.rows)
 			}
 		}
 	}
