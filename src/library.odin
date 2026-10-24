@@ -7,6 +7,7 @@ package nachtul
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:thread"
 
 import niello "../../NielloUI/niello"
@@ -37,6 +38,7 @@ Collection_Row :: struct {
 	added_at:      i64,
 	last_opened:   i64,
 	has_thumbnail: bool,
+	thumbnail:     Maybe([]u8), // filled by page queries only
 }
 
 Song_Row :: struct {
@@ -539,34 +541,108 @@ import_v1 :: proc(dst: Db, v1_path: string) -> (Import_Result, bool) {
 
 // ---- startup loading through the inbox ----------------------------------------------
 
+// The library worker: one thread, one connection, a job queue. The
+// frame thread posts jobs; results land through the one inbox (the
+// messages below). Declare never touches SQL (D1).
+
 Msg :: union {
 	Library_Loaded,
+	Collections_Page,
+	Collection_Songs,
 }
 
 Library_Loaded :: struct {
-	folders:         []Folder,
-	folder_count:    int,
+	folders:          []Folder,
+	folder_count:     int,
 	collection_count: int,
-	song_count:      int,
-	imported:        bool,
-	import_songs:    int,
-	failed:          string,
+	song_count:       int,
+	imported:         bool,
+	import_songs:     int,
+	failed:           string,
 }
+
+Collections_Page :: struct {
+	query: Lib_Query,
+	gen:   u64, // data_generation at fetch time
+	total: int,
+	rows:  []Collection_Row,
+}
+
+Collection_Songs :: struct {
+	collection: Collection_Row,
+	rows:       []Song_Row,
+}
+
+Job :: union {
+	Job_Load,
+	Job_Collections,
+	Job_Songs,
+	Job_Quit,
+}
+
+Job_Load :: struct {}
+
+Job_Collections :: struct {
+	query: Lib_Query,
+}
+
+Job_Songs :: struct {
+	collection_uuid: string,
+}
+
+Job_Quit :: struct {}
 
 box: inbox.Inbox(Msg)
 box_ready: bool
 load_thread: ^thread.Thread
 load_dir: string
 
+jobs: [dynamic]Job
+jobs_mu: sync.Mutex
+jobs_sema: sync.Sema
+
+post_job :: proc(j: Job) {
+	sync.lock(&jobs_mu)
+	append(&jobs, j)
+	sync.unlock(&jobs_mu)
+	sync.sema_post(&jobs_sema)
+}
+
+pop_job :: proc() -> Job {
+	sync.sema_wait(&jobs_sema)
+	sync.lock(&jobs_mu)
+	j := jobs[0]
+	ordered_remove(&jobs, 0)
+	sync.unlock(&jobs_mu)
+	return j
+}
+
+request_collections :: proc(q: Lib_Query) {
+	post_job(Job_Collections{query = q})
+}
+
+request_songs :: proc(collection_uuid: string) {
+	post_job(Job_Songs{collection_uuid = collection_uuid})
+}
+
 start_library_load :: proc(ctx: ^niello.Context, dir: string) {
 	load_dir = dir
+	// Session scratch is (re)made here, under the caller's context:
+	// a dynamic array's header carries its allocator, and letting one
+	// outlive a stop would leave the next start appending through a
+	// stale allocator (the headless suite starts/stops per test).
+	jobs = make([dynamic]Job)
+	drain_scratch = make([dynamic]Msg)
+	page_thumbs = make(map[string]niello.Image)
 	box = inbox.create(Msg, ctx)
 	box_ready = true
-	load_thread = thread.create_and_start_with_data(nil, load_worker)
+	load_thread = thread.create_and_start_with_data(nil, lib_worker)
+	post_job(Job_Load{})
 }
 
 stop_library :: proc() {
 	if load_thread != nil {
+		post_job(Job_Quit{})
 		thread.join(load_thread)
 		thread.destroy(load_thread)
 		load_thread = nil
@@ -577,34 +653,217 @@ stop_library :: proc() {
 	}
 }
 
-load_worker :: proc(_: rawptr) {
-	msg: Library_Loaded
+lib_worker :: proc(_: rawptr) {
 	db_path := fmt.tprintf("%s/Nachtul.db", load_dir)
 	v1_path := fmt.tprintf("%s/NachtulV1.db", load_dir)
 	fresh := !os.exists(db_path)
 	db, ok := db_open(db_path)
 	if !ok {
-		msg.failed = "Could not open Nachtul.db"
-		inbox.send(&box, msg)
+		inbox.send(&box, Library_Loaded{failed = "Could not open Nachtul.db"})
 		return
 	}
 	defer db_close(db)
 	db_create_schema(db)
+	imported := false
+	import_songs := 0
 	if fresh && os.exists(v1_path) {
 		if res, iok := import_v1(db, v1_path); iok {
-			msg.imported = true
-			msg.import_songs = res.songs
+			imported = true
+			import_songs = res.songs
 		}
 	}
-	msg.folders = folders_list(db)
-	msg.folder_count, msg.collection_count, msg.song_count = library_counts(db)
-	inbox.send(&box, msg)
+
+	for {
+		job := pop_job()
+		switch j in job {
+		case Job_Load:
+			msg: Library_Loaded
+			msg.folders = folders_list(db)
+			msg.folder_count, msg.collection_count, msg.song_count = library_counts(db)
+			msg.imported = imported
+			msg.import_songs = import_songs
+			inbox.send(&box, msg)
+		case Job_Collections:
+			rows, total := collections_page(db, j.query)
+			inbox.send(&box, Collections_Page{query = j.query, gen = data_generation, total = total, rows = rows})
+		case Job_Songs:
+			collection_touch_opened(db, j.collection_uuid)
+			row, found := collection_by_uuid(db, j.collection_uuid)
+			if found {
+				inbox.send(&box, Collection_Songs{collection = row, rows = songs_from_collection(db, j.collection_uuid)})
+			}
+		case Job_Quit:
+			return
+		}
+	}
 }
+
+collection_by_uuid :: proc(db: Db, uuid: string) -> (Collection_Row, bool) {
+	stmt, ok := stmt_prepare(db, "SELECT " + COLLECTION_COLS + ", thumbnail FROM Collections WHERE uuid = ?1;")
+	if !ok {
+		return {}, false
+	}
+	defer stmt_finalize(stmt)
+	bind_text(stmt, 1, uuid)
+	if !stmt_step(stmt) {
+		return {}, false
+	}
+	row := scan_collection(stmt)
+	row.thumbnail = col_blob_clone(stmt, 6)
+	return row, true
+}
+
+// ---- page queries ---------------------------------------------------------------------
+
+Lib_Sort :: enum {
+	None, // the section's own order
+	Name,
+	Date_Added,
+	Recent,
+	Size,
+	Duration,
+	Tag_Count,
+}
+
+Lib_Query :: struct {
+	section:   Section,
+	search:    string,
+	sort:      Lib_Sort,
+	page:      int,
+	page_size: int,
+}
+
+// One page of collections for a query, thumbnails included, plus the
+// total match count. Sorting by Size/Duration/Tag_Count/Popular is
+// aggregate SQL over CollectionSongs — the query IS the feature (D1).
+collections_page :: proc(db: Db, q: Lib_Query) -> ([]Collection_Row, int) {
+	cond := strings.builder_make()
+	defer strings.builder_destroy(&cond)
+	strings.write_string(&cond, " WHERE 1 = 1")
+	#partial switch q.section {
+	case .Taglists:
+		strings.write_string(&cond, " AND c.typeEnum = 6")
+	case .Playlists:
+		strings.write_string(&cond, " AND c.typeEnum = 5")
+	case .Artists:
+		strings.write_string(&cond, " AND c.typeEnum = 0")
+	case .Albums:
+		strings.write_string(&cond, " AND c.typeEnum = 1")
+	case .EPs:
+		strings.write_string(&cond, " AND c.typeEnum = 2")
+	case .Singles:
+		strings.write_string(&cond, " AND c.typeEnum = 3")
+	case .Collections:
+		strings.write_string(&cond, " AND c.typeEnum IN (1, 2, 3, 4)")
+	case .Uncategorized:
+		strings.write_string(&cond, " AND c.typeEnum = 7")
+	case .Recent:
+		strings.write_string(&cond, " AND c.lastOpened > 0")
+	}
+	search := strings.trim_space(q.search)
+	if search != "" {
+		terms := strings.split(strings.to_lower(search), " ")
+		defer delete(terms)
+		for term in terms {
+			clean := strings.trim(term, "\"%_")
+			if clean == "" {
+				continue
+			}
+			fmt.sbprintf(&cond, " AND c.searchTokens LIKE '%%\"%s\"%%'", clean)
+		}
+	}
+	where_sql := strings.to_string(cond)
+
+	order: string
+	switch q.sort {
+	case .None:
+		switch q.section {
+		case .Recent:
+			order = "c.lastOpened DESC"
+		case .Popular:
+			order = "agg.tplays DESC, c.name"
+		case .All, .Taglists, .Playlists, .Artists, .Albums, .EPs, .Singles, .Collections, .Uncategorized:
+			order = "c.name"
+		}
+	case .Name:
+		order = "c.name"
+	case .Date_Added:
+		order = "c.addedAt DESC"
+	case .Recent:
+		order = "c.lastOpened DESC"
+	case .Size:
+		order = "agg.tsize DESC, c.name"
+	case .Duration:
+		order = "agg.tdur DESC, c.name"
+	case .Tag_Count:
+		order = "agg.ttags DESC, c.name"
+	}
+
+	count_sql := fmt.tprintf("SELECT COUNT(*) FROM Collections c%s;", where_sql)
+	total := 0
+	if stmt, ok := stmt_prepare(db, count_sql); ok {
+		defer stmt_finalize(stmt)
+		if stmt_step(stmt) {
+			total = int(col_i64(stmt, 0))
+		}
+	}
+
+	page_sql := fmt.tprintf(`
+		SELECT c.uuid, c.typeEnum, c.name, c.addedAt, c.lastOpened, (c.thumbnail IS NOT NULL), c.thumbnail
+		FROM Collections c
+		LEFT JOIN (
+			SELECT cs.collectionUuid_fk AS cid,
+			       SUM(s.sizeInBytes) AS tsize,
+			       SUM(s.duration) AS tdur,
+			       SUM(s.playCount) AS tplays,
+			       (SELECT COUNT(*) FROM SongTags st JOIN CollectionSongs cs2
+			        ON cs2.songUuid_fk = st.songUuid_fk
+			        WHERE cs2.collectionUuid_fk = cs.collectionUuid_fk) AS ttags
+			FROM CollectionSongs cs JOIN Songs s ON s.uuid = cs.songUuid_fk
+			GROUP BY cs.collectionUuid_fk
+		) agg ON agg.cid = c.uuid
+		%s ORDER BY %s LIMIT ?1 OFFSET ?2;`, where_sql, order)
+	stmt, ok := stmt_prepare(db, page_sql)
+	if !ok {
+		return nil, total
+	}
+	defer stmt_finalize(stmt)
+	bind_i64(stmt, 1, i64(q.page_size))
+	bind_i64(stmt, 2, i64(q.page * q.page_size))
+	out: [dynamic]Collection_Row
+	for stmt_step(stmt) {
+		row := scan_collection(stmt)
+		row.thumbnail = col_blob_clone(stmt, 6)
+		append(&out, row)
+	}
+	return out[:], total
+}
+
+// ---- apply (frame thread) --------------------------------------------------------------
 
 drain_scratch: [dynamic]Msg
 
-// Called at the top of declare. Applies whatever the loader (and
-// later producers) sent — the app's one drain point.
+// Decoded thumbnails for the current page only — bounded by the page
+// size, released wholesale when the page changes (D1's cache, kept
+// deliberately small).
+page_thumbs: map[string]niello.Image
+
+apply_page_thumbs :: proc(rows: []Collection_Row) {
+	for uuid, img in page_thumbs {
+		niello.image_release(img)
+	}
+	clear(&page_thumbs)
+	for &row in rows {
+		if thumb, ok := row.thumbnail.?; ok {
+			if img, iok := niello.image_load_memory(thumb, 168, 168); iok {
+				page_thumbs[row.uuid] = img
+			}
+		}
+	}
+}
+
+// Called at the top of declare. Applies whatever producers sent —
+// the app's one drain point.
 drain_library_msgs :: proc() {
 	if !box_ready {
 		return
@@ -622,6 +881,30 @@ drain_library_msgs :: proc() {
 				app.sync_status = m.failed
 			} else if m.imported {
 				app.sync_status = fmt.tprintf("Imported %d songs from NachtulV1.db", m.import_songs)
+			}
+		case Collections_Page:
+			// Stale pages (an older query's answer landing late) drop:
+			// only the page we last asked for, at the current data
+			// generation, applies.
+			if m.query == app.lib_query && m.gen == app.lib_sent_gen {
+				app.lib_rows = m.rows
+				app.lib_total = m.total
+				app.lib_loaded = true
+				apply_page_thumbs(m.rows)
+			}
+		case Collection_Songs:
+			if m.collection.uuid == app.open_uuid {
+				app.open_row = m.collection
+				app.open_songs = m.rows
+				app.open_loaded = true
+				if img, ok := page_thumbs[m.collection.uuid]; ok {
+					app.open_art = img
+				} else if thumb, tok := m.collection.thumbnail.?; tok {
+					if img, iok := niello.image_load_memory(thumb, 280, 280); iok {
+						app.open_art = img
+						app.open_art_owned = true
+					}
+				}
 			}
 		}
 	}

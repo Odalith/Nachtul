@@ -9,6 +9,7 @@
 package nachtul
 
 import "core:fmt"
+import "core:strings"
 
 import niello "../../NielloUI/niello"
 
@@ -45,6 +46,72 @@ App :: struct {
 	folder_count:     int,
 	collection_count: int,
 	song_count:       int,
+	// Library screens (step 3).
+	search:         Text_Field,
+	sort:           Lib_Sort,
+	sort_open:      bool,
+	page:           int,
+	lib_query:      Lib_Query,
+	lib_sent:       Lib_Query,
+	lib_sent_gen:   u64,
+	lib_rows:       []Collection_Row,
+	lib_total:      int,
+	lib_loaded:     bool,
+	open_uuid:      string,
+	open_row:       Collection_Row,
+	open_songs:     []Song_Row,
+	open_loaded:    bool,
+	open_art:       niello.Image,
+	open_art_owned: bool,
+	selected_song:  string,
+}
+
+PAGE_SIZE :: 30
+
+Sort_Def :: struct {
+	sort:  Lib_Sort,
+	label: string,
+}
+
+SORT_DEFS := [?]Sort_Def{
+	{.None, "Section order"},
+	{.Name, "Name"},
+	{.Date_Added, "Date Added"},
+	{.Recent, "Recent"},
+	{.Size, "Size"},
+	{.Duration, "Duration"},
+	{.Tag_Count, "Tag Count"},
+}
+
+sort_label :: proc(s: Lib_Sort) -> string {
+	for d in SORT_DEFS {
+		if d.sort == s {
+			return d.label
+		}
+	}
+	return "?"
+}
+
+collection_type_label :: proc(t: Collection_Type) -> string {
+	switch t {
+	case .Artist:
+		return "Artist"
+	case .Album:
+		return "Album"
+	case .ExtendedPlay:
+		return "EP"
+	case .Single:
+		return "Single"
+	case .Compilation:
+		return "Compilation"
+	case .Playlist:
+		return "Playlist"
+	case .Taglist:
+		return "Taglist"
+	case .Uncategorized:
+		return "Uncategorized"
+	}
+	return "?"
 }
 
 app := App{sync_status = "Ready"}
@@ -55,6 +122,14 @@ app := App{sync_status = "Ready"}
 Instances :: struct {
 	nav:          [3]niello.Instance,
 	section:      [11]niello.Instance,
+	grid_scroll:  niello.Instance,
+	sort_btn:     niello.Instance,
+	sort_items:   [len(SORT_DEFS)]niello.Instance,
+	page_prev:    niello.Instance,
+	page_next:    niello.Instance,
+	cards:        [PAGE_SIZE]niello.Instance,
+	back:         niello.Instance,
+	song_first:   niello.Instance,
 	prev, play, next: niello.Instance,
 	queue:        niello.Instance,
 	settings:     niello.Instance,
@@ -130,8 +205,8 @@ top_bar :: proc() {
 	}
 }
 
-nav_button :: proc(key: string, label: string, selected: bool) -> niello.Instance {
-	i, open := niello.begin(top.nav, niello.key(key), {variant = selected ? common.sel : niello.NO_UNIT})
+nav_button :: proc(key: string, label: string, selected: bool, disabled: bool = false) -> niello.Instance {
+	i, open := niello.begin(top.nav, niello.key(key), {variant = selected ? common.sel : niello.NO_UNIT, disabled = disabled})
 	if open {
 		niello.show(top.nav_label, 0, {
 			text = label,
@@ -170,6 +245,30 @@ SECTION_DEFS := [11]struct {
 }
 
 screen_library :: proc() {
+	if app.open_uuid != "" {
+		screen_collection()
+		return
+	}
+	// The search box edits at declare (the form example's pattern);
+	// a change re-pages from the top.
+	if edit_text_field(&app.search) {
+		app.page = 0
+	}
+	// The query trigger (D1): desired state vs what was last posted.
+	desired := Lib_Query{
+		section = app.section,
+		search = text_field_string(&app.search),
+		sort = app.sort,
+		page = app.page,
+		page_size = PAGE_SIZE,
+	}
+	app.lib_query = desired
+	if app.loaded && (desired != app.lib_sent || data_generation != app.lib_sent_gen) {
+		app.lib_sent = desired
+		app.lib_sent_gen = data_generation
+		request_collections(desired)
+	}
+
 	if _, ok := niello.begin(lib.row); ok {
 		if _, ok2 := niello.begin(lib.sidebar); ok2 {
 			for def, i in SECTION_DEFS {
@@ -184,16 +283,204 @@ screen_library :: proc() {
 				}
 			}
 		}
-		if _, ok3 := niello.begin(lib.panel); ok3 {
-			if app.loaded {
-				niello.show(lib.placeholder, 0, {
-					text = fmt.tprintf("%d songs · %d collections · %d folders\nThe library browser arrives in step 3.", app.song_count, app.collection_count, app.folder_count),
-				})
-			} else {
-				niello.show(lib.placeholder, 0, {text = "Loading library…"})
+		if _, ok3 := niello.begin(lib.content, niello.key("lib_content")); ok3 {
+			if _, okh := niello.begin(lib.header); okh {
+				show_text_field(&app.search, niello.key("search"), "Search")
+				instances.sort_btn = nav_button("sort", fmt.tprintf("Sort: %s", sort_label(app.sort)), app.sort_open)
+			}
+			grid_columns()
+			gs, okg := niello.begin(lib.grid_scroll)
+			instances.grid_scroll = gs
+			if okg {
+				if !app.lib_loaded {
+					niello.show(lib.placeholder, 0, {text = app.loaded ? "Loading…" : "Loading library…"})
+				} else if len(app.lib_rows) == 0 {
+					niello.show(lib.placeholder, 0, {text = text_field_string(&app.search) != "" ? "No matches." : "No collections in this section yet."})
+				} else {
+					cols := grid_cols
+					row_count := (len(app.lib_rows) + cols - 1) / cols
+					for r in 0 ..< row_count {
+						if _, okr := niello.begin(lib.grid_row, niello.key_int(r)); okr {
+							for c in 0 ..< cols {
+								idx := r * cols + c
+								if idx < len(app.lib_rows) {
+									collection_card(&app.lib_rows[idx], idx)
+								}
+							}
+						}
+					}
+				}
+			}
+			if _, okp := niello.begin(lib.pager); okp {
+				instances.page_prev = nav_button("page_prev", "Prev", false, app.page <= 0)
+				niello.show(lib.pager_label, 0, {text = fmt.tprintf("Page %d of %d · %d collections", app.page + 1, pager_pages(), app.lib_total)})
+				instances.page_next = nav_button("page_next", "Next", false, app.page + 1 >= pager_pages())
 			}
 		}
 	}
+	if app.sort_open {
+		sort_menu()
+	}
+}
+
+// Column count for the card grid, from the grid's last-frame width.
+grid_cols: int = 5
+
+grid_columns :: proc() {
+	if r, ok := niello.rect(instances.grid_scroll); ok && r.size.x > 0 {
+		grid_cols = clamp(int((r.size.x + 12) / (168 + 12)), 1, 8)
+	}
+}
+
+collection_card :: proc(row: ^Collection_Row, idx: int) {
+	i, open := niello.begin(lib.card, niello.key(row.uuid))
+	instances.cards[idx] = i
+	if !open {
+		return
+	}
+	if img, ok := page_thumbs[row.uuid]; ok {
+		niello.begin(lib.card_art, niello.key_int(1), {image = img})
+	} else if _, aopen := niello.begin(lib.card_art, niello.key_int(1)); aopen {
+		first := row.name != "" ? row.name[:1] : "?"
+		niello.show(lib.card_letter, 0, {text = first})
+	}
+	niello.show(lib.card_name, niello.key_int(2), {text = row.name})
+	niello.show(lib.card_meta, niello.key_int(3), {text = collection_type_label(row.type)})
+}
+
+sort_menu :: proc() {
+	pi, open := niello.begin_popup(lib.menu_panel, instances.sort_btn, niello.Placement.Below, {gap = 4}, key = niello.key("sort_menu"))
+	if open {
+		for def, i in SORT_DEFS {
+			inst, iopen := niello.begin(lib.menu_item, niello.key_int(i), {variant = app.sort == def.sort ? common.sel : niello.NO_UNIT})
+			instances.sort_items[i] = inst
+			if iopen {
+				niello.show(lib.menu_label, 0, {text = def.label})
+			}
+		}
+	}
+	if niello.dismiss_requested(pi) {
+		app.sort_open = false
+	}
+}
+
+pager_pages :: proc() -> int {
+	if app.lib_total <= 0 {
+		return 1
+	}
+	return (app.lib_total + PAGE_SIZE - 1) / PAGE_SIZE
+}
+
+screen_collection :: proc() {
+	if _, ok := niello.begin(lib.content, niello.key("collection")); ok {
+		instances.back = nav_button("back", "Back", false)
+		if _, okh := niello.begin(album.header); okh {
+			if app.open_art != 0 {
+				niello.show(album.art, 0, {image = app.open_art})
+			} else {
+				niello.show(album.art)
+			}
+			if _, oki := niello.begin(lib.content, niello.key("album_info")); oki {
+				niello.show(album.name, 0, {text = app.open_loaded ? app.open_row.name : "Loading…"})
+				niello.show(album.meta, 0, {text = album_meta_text()})
+			}
+		}
+		if _, oks := niello.begin(album.scroll); oks {
+			clear(&song_row_insts)
+			for &song, idx in app.open_songs {
+				i, open := niello.begin(album.row, niello.key(song.uuid), {variant = song.uuid == app.selected_song ? common.sel : niello.NO_UNIT})
+				append(&song_row_insts, i)
+				if idx == 0 {
+					instances.song_first = i
+				}
+				if open {
+					pos := song.position != 0 ? song.position : i64(idx + 1)
+					niello.show(album.row_pos, niello.key_int(1), {text = fmt.tprintf("%d", pos)})
+					niello.show(album.row_title, niello.key_int(2), {text = song.title})
+					niello.show(album.row_artists, niello.key_int(3), {text = artists_join(song.artists)})
+					niello.show(album.row_dur, niello.key_int(4), {text = fmt_duration_ms(song.duration)})
+				}
+			}
+			if app.open_loaded && len(app.open_songs) == 0 {
+				niello.show(lib.placeholder, 0, {text = "No songs."})
+			}
+		}
+	}
+}
+
+song_row_insts: [dynamic]niello.Instance
+
+album_meta_text :: proc() -> string {
+	if !app.open_loaded {
+		return ""
+	}
+	total_ms: i64 = 0
+	for s in app.open_songs {
+		total_ms += s.duration
+	}
+	return fmt.tprintf("%s · %d songs · %s", collection_type_label(app.open_row.type), len(app.open_songs), fmt_duration_ms(total_ms))
+}
+
+fmt_duration_ms :: proc(ms: i64) -> string {
+	secs := ms / 1000
+	return fmt.tprintf("%d:%02d", secs / 60, secs % 60)
+}
+
+// Joins the artists JSON array for display: walks the string
+// literals, undoing the escapes the encoder emits.
+artists_join :: proc(json: string) -> string {
+	b := strings.builder_make()
+	count := 0
+	i := 0
+	for i < len(json) {
+		if json[i] != '"' {
+			i += 1
+			continue
+		}
+		i += 1 // opening quote
+		start := i
+		for i < len(json) && json[i] != '"' {
+			if json[i] == '\\' {
+				i += 1
+			}
+			i += 1
+		}
+		if count > 0 {
+			strings.write_string(&b, ", ")
+		}
+		raw := json[start:i]
+		j := 0
+		for j < len(raw) {
+			if raw[j] == '\\' && j + 1 < len(raw) {
+				j += 1
+			}
+			strings.write_byte(&b, raw[j])
+			j += 1
+		}
+		count += 1
+		i += 1 // closing quote
+	}
+	out := strings.clone(strings.to_string(b))
+	strings.builder_destroy(&b)
+	return out
+}
+
+close_collection :: proc() {
+	if app.open_art_owned && int(app.open_art) != 0 {
+		niello.image_release(app.open_art)
+	}
+	app.open_art = 0
+	app.open_art_owned = false
+	app.open_uuid = ""
+	app.open_loaded = false
+	app.open_songs = nil
+	app.selected_song = ""
+}
+
+open_collection :: proc(uuid: string) {
+	close_collection()
+	app.open_uuid = uuid
+	request_songs(uuid)
 }
 
 screen_composer :: proc() {
@@ -287,11 +574,51 @@ dispatch :: proc() {
 	for def, i in NAV_DEFS {
 		if niello.clicked(instances.nav[i]) {
 			app.screen = def.screen
+			close_collection()
+			app.sort_open = false
 		}
 	}
 	for def, i in SECTION_DEFS {
 		if niello.clicked(instances.section[i]) {
 			app.section = def.section
+			app.page = 0
+			close_collection()
+		}
+	}
+	if niello.clicked(instances.sort_btn) {
+		app.sort_open = true
+	}
+	if app.sort_open {
+		for def, i in SORT_DEFS {
+			if niello.clicked(instances.sort_items[i]) {
+				app.sort = def.sort
+				app.page = 0
+				app.sort_open = false
+			}
+		}
+	}
+	if niello.clicked(instances.page_prev) && app.page > 0 {
+		app.page -= 1
+	}
+	if niello.clicked(instances.page_next) && app.page + 1 < pager_pages() {
+		app.page += 1
+	}
+	if app.open_uuid == "" {
+		for _, idx in app.lib_rows {
+			if niello.clicked(instances.cards[idx]) {
+				open_collection(app.lib_rows[idx].uuid)
+				break
+			}
+		}
+	} else {
+		if niello.clicked(instances.back) {
+			close_collection()
+		}
+		for inst, idx in song_row_insts {
+			if idx < len(app.open_songs) && niello.clicked(inst) {
+				app.selected_song = app.open_songs[idx].uuid
+				break
+			}
 		}
 	}
 	if niello.clicked(instances.play) {
@@ -311,3 +638,4 @@ dispatch :: proc() {
 		}
 	}
 }
+

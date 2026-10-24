@@ -59,6 +59,42 @@ Library :: struct {
 	section_label: niello.Unit,
 	panel:         niello.Unit,
 	placeholder:   niello.Unit,
+	content:         niello.Unit, // TTB column: header + grid + pager
+	pager:           niello.Unit,
+	// Section header + borrowed search field (src/textfield.odin)
+	header:          niello.Unit,
+	field:           niello.Unit,
+	field_focus:     niello.Unit,
+	field_text:      niello.Unit,
+	caret:           niello.Unit,
+	placeholder_text: niello.Unit,
+	// Collection grid
+	grid_scroll: niello.Unit,
+	grid_row:    niello.Unit,
+	card:        niello.Unit,
+	card_art:    niello.Unit,
+	card_letter: niello.Unit,
+	card_name:   niello.Unit,
+	card_meta:   niello.Unit,
+	pager_label: niello.Unit,
+	// Sort menu (popup)
+	menu_panel: niello.Unit,
+	menu_item:  niello.Unit,
+	menu_label: niello.Unit,
+}
+
+Album :: struct {
+	header:    niello.Unit,
+	art:       niello.Unit,
+	name:      niello.Unit,
+	meta:      niello.Unit,
+	scroll:    niello.Unit,
+	row:       niello.Unit,
+	row_hover: niello.Unit,
+	row_pos:   niello.Unit,
+	row_title: niello.Unit,
+	row_artists: niello.Unit,
+	row_dur:   niello.Unit,
 }
 
 Composer :: struct {
@@ -100,6 +136,7 @@ Common :: struct {
 top: Topbar
 np: Now_Playing
 lib: Library
+album: Album
 comp: Composer
 pb: Playback
 pop: Popup
@@ -183,6 +220,127 @@ init_theme :: proc() {
 		align = [2]niello.Align_Kind{niello.Align_Kind.Center, niello.Align_Kind.Center},
 	})
 	niello.mint(&lib.placeholder, niello.NO_UNIT, {font_size = 14, font_color = COL_DIM})
+
+	niello.mint(&lib.content, niello.NO_UNIT, {
+		layout = niello.Layout.Top_To_Bottom,
+		size = niello.Size{niello.grow(), niello.grow()},
+		gap = 8,
+	})
+	niello.mint(&lib.pager, niello.NO_UNIT, {
+		layout = niello.Layout.Left_To_Right,
+		size = niello.Size{niello.grow(), niello.fixed(36)},
+		gap = 8,
+		align = [2]niello.Align_Kind{niello.Align_Kind.Center, niello.Align_Kind.Center},
+	})
+	niello.mint(&lib.header, niello.NO_UNIT, {
+		layout = niello.Layout.Left_To_Right,
+		size = niello.Size{niello.grow(), niello.fixed(44)},
+		gap = 8,
+		align = [2]niello.Align_Kind{niello.Align_Kind.Start, niello.Align_Kind.Center},
+	})
+	niello.mint(&lib.field_focus, niello.NO_UNIT, {
+		color = niello.Color{255, 255, 255, 14},
+		overlay_border_color = COL_ACCENT, overlay_border_width = 2,
+	})
+	niello.mint(&lib.field, niello.NO_UNIT, {
+		layout = niello.Layout.Left_To_Right,
+		size = niello.Size{niello.grow(1), niello.fixed(36)},
+		color = COL_PANEL2, corner_radius = 8,
+		padding = [4]u16{12, 0, 12, 0},
+		align = [2]niello.Align_Kind{niello.Align_Kind.Start, niello.Align_Kind.Center},
+		focus = lib.field_focus, focusable = true,
+	})
+	niello.mint(&lib.field_text, niello.NO_UNIT, {
+		font_size = 14, font_color = COL_TEXT,
+		whitespace = niello.Whitespace.Preserve,
+	})
+	niello.mint(&lib.caret, niello.NO_UNIT, {
+		size = niello.Size{niello.fixed(2), niello.fixed(20)},
+		color = COL_ACCENT,
+	})
+	niello.mint(&lib.placeholder_text, niello.NO_UNIT, {font_size = 14, font_color = COL_DIM})
+	niello.mint(&lib.grid_scroll, niello.NO_UNIT, {
+		layout = niello.Layout.Top_To_Bottom,
+		size = niello.Size{niello.grow(), niello.grow()},
+		scroll = niello.Scroll.Vertical, smooth_scroll = true,
+		gap = 12,
+	})
+	niello.mint(&lib.grid_row, niello.NO_UNIT, {
+		layout = niello.Layout.Left_To_Right,
+		size = niello.Size{niello.grow(), niello.fit()},
+		gap = 12,
+	})
+	niello.mint(&lib.card, niello.NO_UNIT, {
+		layout = niello.Layout.Top_To_Bottom,
+		size = niello.Size{niello.fixed(168), niello.fixed(212)},
+		gap = 4,
+		hover = top.nav_hover, focusable = true, corner_radius = 8,
+	})
+	niello.mint(&lib.card_art, niello.NO_UNIT, {
+		layout = niello.Layout.Stack,
+		size = niello.Size{niello.fixed(168), niello.fixed(168)},
+		color = COL_PANEL2, corner_radius = 8,
+		image_fit = niello.Image_Fit.Uniform_Fill,
+		align = [2]niello.Align_Kind{niello.Align_Kind.Center, niello.Align_Kind.Center},
+	})
+	niello.mint(&lib.card_letter, niello.NO_UNIT, {font_size = 44, font_color = COL_DIM})
+	niello.mint(&lib.card_name, niello.NO_UNIT, {font_size = 13.5, font_color = COL_TEXT})
+	niello.mint(&lib.card_meta, niello.NO_UNIT, {font_size = 12, font_color = COL_DIM})
+	niello.mint(&lib.pager_label, niello.NO_UNIT, {font_size = 13, font_color = COL_DIM})
+	niello.mint(&lib.menu_panel, niello.NO_UNIT, {
+		layout = niello.Layout.Top_To_Bottom,
+		size = niello.Size{niello.fixed(200), niello.fit()},
+		color = COL_PANEL2, corner_radius = 8,
+		padding = [4]u16{6, 6, 6, 6}, gap = 2,
+	})
+	niello.mint(&lib.menu_item, niello.NO_UNIT, {
+		layout = niello.Layout.Stack,
+		size = niello.Size{niello.grow(), niello.fixed(30)},
+		padding = [4]u16{10, 0, 10, 0},
+		align = [2]niello.Align_Kind{niello.Align_Kind.Start, niello.Align_Kind.Center},
+		corner_radius = 6,
+		hover = top.nav_hover, focusable = true,
+	})
+	niello.mint(&lib.menu_label, niello.NO_UNIT, {font_size = 13, font_color = COL_TEXT})
+
+	// Album (collection view)
+	niello.mint(&album.header, niello.NO_UNIT, {
+		layout = niello.Layout.Left_To_Right,
+		size = niello.Size{niello.grow(), niello.fixed(172)},
+		padding = [4]u16{16, 16, 16, 16}, gap = 16,
+	})
+	niello.mint(&album.art, niello.NO_UNIT, {
+		size = niello.Size{niello.fixed(140), niello.fixed(140)},
+		color = COL_PANEL2, corner_radius = 8,
+		image_fit = niello.Image_Fit.Uniform_Fill,
+	})
+	niello.mint(&album.name, niello.NO_UNIT, {font_size = 20, font_color = COL_TEXT})
+	niello.mint(&album.meta, niello.NO_UNIT, {font_size = 13.5, font_color = COL_DIM})
+	niello.mint(&album.scroll, niello.NO_UNIT, {
+		layout = niello.Layout.Top_To_Bottom,
+		size = niello.Size{niello.grow(), niello.grow()},
+		scroll = niello.Scroll.Vertical, smooth_scroll = true,
+		padding = [4]u16{8, 4, 8, 4},
+	})
+	niello.mint(&album.row_hover, niello.NO_UNIT, {color = COL_HOVER})
+	niello.mint(&album.row, niello.NO_UNIT, {
+		layout = niello.Layout.Left_To_Right,
+		size = niello.Size{niello.grow(), niello.fixed(38)},
+		padding = [4]u16{12, 0, 12, 0}, gap = 10,
+		align = [2]niello.Align_Kind{niello.Align_Kind.Start, niello.Align_Kind.Center},
+		corner_radius = 6,
+		hover = album.row_hover, focusable = true,
+	})
+	niello.mint(&album.row_pos, niello.NO_UNIT, {
+		font_size = 12.5, font_color = COL_DIM,
+		size = niello.Size{niello.fixed(30), niello.fit()},
+	})
+	niello.mint(&album.row_title, niello.NO_UNIT, {font_size = 14, font_color = COL_TEXT})
+	niello.mint(&album.row_artists, niello.NO_UNIT, {
+		font_size = 13, font_color = COL_DIM,
+		size = niello.Size{niello.grow(), niello.fit()},
+	})
+	niello.mint(&album.row_dur, niello.NO_UNIT, {font_size = 12.5, font_color = COL_DIM})
 
 	// Composer
 	niello.mint(&comp.tray, niello.NO_UNIT, {
