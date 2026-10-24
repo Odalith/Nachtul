@@ -39,9 +39,14 @@ test_spall_trace :: proc(t: ^testing.T) {
 	}
 	nachtul.start_library_load(niello.test_context(), dir)
 	testing.expect(t, wait_for(proc() -> bool { return nachtul.app.loaded }), "library loads under profiling")
-	// Switch to the Library screen so a screen_library event lands too.
+	// Switch to the Library screen so a screen_library event lands too,
+	// and wait for the page to actually apply — apply_page_thumbs
+	// runs in the same drain step that sets lib_loaded, so waiting
+	// for it (rather than a fixed settle) is what makes the
+	// thumbnail event deterministic here.
 	click(nachtul.instances.nav[1])
-	settle(2)
+	testing.expect(t, wait_for(proc() -> bool { return nachtul.app.lib_loaded }), "page lands under profiling")
+	settle(1)
 	nachtul.stop_library()
 	settle(1)
 	nachtul.prof_shutdown()
@@ -55,6 +60,7 @@ test_spall_trace :: proc(t: ^testing.T) {
 	text := string(data)
 	testing.expect(t, strings.contains(text, "declare"), "declare event present")
 	testing.expect(t, strings.contains(text, "screen_library"), "screen event present")
+	testing.expect(t, strings.contains(text, "apply_page_thumbs"), "thumbnail event present")
 	testing.expect(t, strings.contains(text, "library_load"), "worker event present")
 	testing.expect(t, strings.contains(text, "library"), "worker thread named")
 	testing.expect(t, !nachtul.prof_enabled, "profiling is off again after shutdown")

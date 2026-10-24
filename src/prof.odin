@@ -14,6 +14,10 @@
 // trace the boundaries that matter here — one declare per frame on the
 // main thread, one job at a time on the library worker — and nothing
 // else. Adding a new event is prof_begin(name) + defer prof_end().
+// apply_page_thumbs is the one decode burst that lives inside declare:
+// it exists so a long declare frame can be told apart from a slow
+// declare, since page landings decode up to 30 thumbnails on the
+// frame thread.
 //
 // Timestamps are monotonic nanoseconds, so there is no 2-second TSC
 // calibration at startup: context_create_with_scale(..., false, 1)

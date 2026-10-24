@@ -50,7 +50,9 @@ viewer at https://gravitymoth.com/spall/spall-web.html:
     NACHTUL_SPALL_FILE=/tmp/nachtul.spall NACHTUL_SPALL=1 odin run .
 
 The trace has two threads — `main` (one `declare` event per frame,
-with `screen_library`, `screen_collection`, and `play_bar` inside it)
+with `screen_library`, `screen_collection`, and `play_bar` inside it,
+plus `apply_page_thumbs` on the frames where a page lands and its
+thumbnails are decoded)
 and `library` (one event per worker job: `library_load`,
 `collections_page`, `songs_from_collection`, `import_v1`). Close the
 window to flush and close the file; `*.spall` is gitignored. The

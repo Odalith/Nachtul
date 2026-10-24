@@ -877,6 +877,8 @@ drain_scratch: [dynamic]Msg
 page_thumbs: map[string]niello.Image
 
 apply_page_thumbs :: proc(rows: []Collection_Row) {
+	prof_begin("apply_page_thumbs")
+	defer prof_end()
 	for uuid, img in page_thumbs {
 		niello.image_release(img)
 	}
