@@ -39,6 +39,8 @@ App :: struct {
 	playing:          bool,
 	settings_open:    bool,
 	position_secs:    f32, // synthesized playback position (step 4 gets a real track)
+	seek_pct:         f32, // last percent written to pb.seek_fill (see play_bar)
+	seek_pct_valid:   bool,
 	sync_status:      string,
 	// Library state, landed by the loader through the inbox (step 2).
 	loaded:           bool,
@@ -145,6 +147,8 @@ FAKE_TRACK_SECS :: 213 // 3:33 — placeholder until step 4
 // The glue entry point. One drain point will land here in step 2
 // (the one-inbox rule); step 1 has no producers yet.
 declare :: proc() {
+	prof_begin("declare")
+	defer prof_end()
 	// The one drain point: producers (the library loader today, the
 	// audio backend and scanner later) land here, before anything
 	// projects state.
@@ -245,6 +249,8 @@ SECTION_DEFS := [11]struct {
 }
 
 screen_library :: proc() {
+	prof_begin("screen_library")
+	defer prof_end()
 	if app.open_uuid != "" {
 		screen_collection()
 		return
@@ -372,6 +378,8 @@ pager_pages :: proc() -> int {
 }
 
 screen_collection :: proc() {
+	prof_begin("screen_collection")
+	defer prof_end()
 	if _, ok := niello.begin(lib.content, niello.key("collection")); ok {
 		instances.back = nav_button("back", "Back", false)
 		if _, okh := niello.begin(album.header); okh {
@@ -519,6 +527,8 @@ tray :: proc(key: string, title: string) {
 // ---- playback bar ---------------------------------------------------------------
 
 play_bar :: proc() {
+	prof_begin("play_bar")
+	defer prof_end()
 	if _, ok := niello.begin(pb.bar); ok {
 		instances.prev = transport_button("prev", "Prev")
 		{
@@ -535,9 +545,22 @@ play_bar :: proc() {
 		}
 		if _, ok3 := niello.begin(pb.seek_track); ok3 {
 			// The fill is a singleton unit, so its fraction is a
-			// per-frame unit write (With carries content, not size).
+			// unit write (With carries content, not size). It must
+			// ONLY be written when the percent actually changed:
+			// niello.set touches unconditionally, and a touch bumps
+			// the unit's visual generation, which pass F reads as
+			// damage, which makes frame_end report changed, which
+			// makes the glue frame again immediately — a
+			// self-perpetuating loop that framed this app at vsync
+			// even idle (470 declares in an idle trace, play off).
+			// Guarding the write breaks the loop: idle frames stop
+			// after the first unchanged one and the host blocks.
 			pct := app.position_secs / FAKE_TRACK_SECS
-			niello.set(pb.seek_fill, niello.Field.Size, niello.Size{niello.percent(pct), niello.percent(1)})
+			if !app.seek_pct_valid || pct != app.seek_pct {
+				app.seek_pct = pct
+				app.seek_pct_valid = true
+				niello.set(pb.seek_fill, niello.Field.Size, niello.Size{niello.percent(pct), niello.percent(1)})
+			}
 			niello.show(pb.seek_fill)
 		}
 		niello.show(pb.time, 0, {text = fmt.tprintf("%s / %s", fmt_time(app.position_secs), fmt_time(FAKE_TRACK_SECS))})

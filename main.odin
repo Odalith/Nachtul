@@ -11,6 +11,18 @@ import nachtul "./src"
 
 main :: proc() {
 	nachtul.init_theme()
+	// Spall profiling (src/prof.odin): off unless NACHTUL_SPALL is
+	// set. This defer is registered FIRST, at proc top level, so it
+	// runs LAST — after stop_library joins the worker (flushing its
+	// buffer) and after the context is destroyed. It must NOT sit
+	// inside the if block: a defer in a block runs at the end of
+	// that block, which would close the trace before run() starts.
+	// prof_shutdown is a no-op when profiling is off, so registering
+	// it unconditionally is safe.
+	defer nachtul.prof_shutdown()
+	if nachtul.prof_init_from_env() {
+		nachtul.prof_init_main()
+	}
 	ctx := niello.context_create()
 	defer niello.context_destroy(ctx)
 	// The library loads on a worker and lands through the inbox;
