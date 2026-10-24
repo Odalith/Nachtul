@@ -34,6 +34,7 @@ teardown :: proc() {
 	if len(nachtul.app.selected_song) > 0 {
 		delete(nachtul.app.selected_song)
 	}
+	nachtul.player_reset()
 	nachtul.app = nachtul.App{}
 	niello.test_teardown()
 }
@@ -109,17 +110,19 @@ test_play_toggle_and_position_synthesis :: proc(t: ^testing.T) {
 	setup()
 	defer teardown()
 	settle()
-	testing.expect(t, !nachtul.app.playing, "starts paused")
+	testing.expect(t, nachtul.player.state == .Stopped, "starts stopped")
+	// Appending to an empty queue starts playing (F1).
+	nachtul.player_append(&nachtul.player, fake_entry())
+	testing.expect(t, nachtul.player.state == .Playing, "append to an empty queue starts playing")
 	click(nachtul.instances.play)
-	testing.expect(t, nachtul.app.playing, "play click toggles playing")
-	before := nachtul.app.position_secs
+	testing.expect(t, nachtul.player.state == .Paused, "play click pauses")
+	before := nachtul.player_position_ms(&nachtul.player)
 	settle(4)
-	testing.expect(t, nachtul.app.position_secs > before, "position synthesizes forward while playing")
+	testing.expect(t, nachtul.player_position_ms(&nachtul.player) == before, "position holds while paused")
 	click(nachtul.instances.play)
-	testing.expect(t, !nachtul.app.playing, "second click pauses")
-	frozen := nachtul.app.position_secs
+	testing.expect(t, nachtul.player.state == .Playing, "second click resumes")
 	settle(4)
-	testing.expect(t, nachtul.app.position_secs == frozen, "position holds while paused")
+	testing.expect(t, nachtul.player_position_ms(&nachtul.player) > before, "position advances while playing")
 }
 
 @(test)

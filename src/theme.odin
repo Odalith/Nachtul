@@ -95,6 +95,7 @@ Album :: struct {
 	row_title: niello.Unit,
 	row_artists: niello.Unit,
 	row_dur:   niello.Unit,
+	row_play:  niello.Unit, // hover play button, anchored over the pos slot
 }
 
 Composer :: struct {
@@ -118,6 +119,7 @@ Playback :: struct {
 	time:       niello.Unit,
 	vol_track:  niello.Unit,
 	vol_fill:   niello.Unit, // accent member
+	vol_label:  niello.Unit, // numeric volume readout, e.g. "75%"
 }
 
 Popup :: struct {
@@ -341,6 +343,12 @@ init_theme :: proc() {
 		size = niello.Size{niello.grow(), niello.fit()},
 	})
 	niello.mint(&album.row_dur, niello.NO_UNIT, {font_size = 12.5, font_color = COL_DIM})
+	niello.mint(&album.row_play, niello.NO_UNIT, {
+		size = niello.Size{niello.fixed(52), niello.fixed(38)},
+		align = [2]niello.Align_Kind{niello.Align_Kind.Start, niello.Align_Kind.Center},
+		color = COL_PANEL, corner_radius = 6,
+		font_size = 13, font_color = COL_TEXT,
+	})
 
 	// Composer
 	niello.mint(&comp.tray, niello.NO_UNIT, {
@@ -403,6 +411,7 @@ init_theme :: proc() {
 		size = niello.Size{niello.percent(0.75), niello.percent(1)},
 		color = COL_ACCENT, corner_radius = 3,
 	})
+	niello.mint(&pb.vol_label, niello.NO_UNIT, {font_size = 12.5, font_color = COL_TEXT})
 
 	// Settings popup
 	niello.mint(&pop.panel, niello.NO_UNIT, {

@@ -36,11 +36,11 @@ Section :: enum {
 App :: struct {
 	screen:           Screen,
 	section:          Section,
-	playing:          bool,
 	settings_open:    bool,
-	position_secs:    f32, // synthesized playback position (step 4 gets a real track)
 	seek_pct:         f32, // last percent written to pb.seek_fill (see play_bar)
 	seek_pct_valid:   bool,
+	vol_pct:          f32, // last fraction written to pb.vol_fill
+	vol_pct_valid:    bool,
 	sync_status:      string,
 	// Library state, landed by the loader through the inbox (step 2).
 	loaded:           bool,
@@ -133,6 +133,8 @@ Instances :: struct {
 	back:         niello.Instance,
 	song_first:   niello.Instance,
 	prev, play, next: niello.Instance,
+	seek_track, vol_track: niello.Instance,
+	shuffle, loop, mute: niello.Instance,
 	queue:        niello.Instance,
 	settings:     niello.Instance,
 	sync:         niello.Instance,
@@ -141,8 +143,6 @@ Instances :: struct {
 }
 
 instances: Instances
-
-FAKE_TRACK_SECS :: 213 // 3:33 — placeholder until step 4
 
 // The glue entry point. One drain point will land here in step 2
 // (the one-inbox rule); step 1 has no producers yet.
@@ -154,15 +154,16 @@ declare :: proc() {
 	// projects state.
 	drain_library_msgs()
 
-	// Position synthesis, frame-side (the brief §1 pattern): while
-	// playing, re-arm a 250 ms wake and advance the position. Idle
-	// with nothing playing, the window sleeps.
-	if app.playing {
-		niello.wake_in(250)
-		app.position_secs += 0.25
-		if app.position_secs >= FAKE_TRACK_SECS {
-			app.position_secs = 0
-		}
+	// Playback position + advance (step 4): while playing, re-arm
+	// a 1 s wake (his ruling — the bar updates at 1 Hz, and the
+	// position itself is wall-clock-anchored, so no tick counting
+	// and no drift) and advance on wall-clock track end. Gapless
+	// switches are silent (no callback), so the clock is the
+	// advance signal; EOF, drained above, is only a backstop.
+	// Idle with nothing playing, the window sleeps.
+	if player.state == .Playing {
+		niello.wake_in(1000)
+		player_natural_advance(&player)
 	}
 
 	if _, ok := niello.begin(root_u); ok {
@@ -395,9 +396,11 @@ screen_collection :: proc() {
 		}
 		if _, oks := niello.begin(album.scroll); oks {
 			clear(&song_row_insts)
+			clear(&song_row_play_insts)
 			for &song, idx in app.open_songs {
 				i, open := niello.begin(album.row, niello.key(song.uuid), {variant = song.uuid == app.selected_song ? common.sel : niello.NO_UNIT})
 				append(&song_row_insts, i)
+				append(&song_row_play_insts, 0)
 				if idx == 0 {
 					instances.song_first = i
 				}
@@ -407,6 +410,14 @@ screen_collection :: proc() {
 					niello.show(album.row_title, niello.key_int(2), {text = song.title})
 					niello.show(album.row_artists, niello.key_int(3), {text = artists_join(song.artists)})
 					niello.show(album.row_dur, niello.key_int(4), {text = fmt_duration_ms(song.duration)})
+					// Hover play button (F1): anchored over the
+					// row's position slot. Anchored children take
+					// no flow slot, so appearing on hover never
+					// shifts the row's text — and on hover it
+					// replaces the track number, like every player.
+					if niello.hovered(i) {
+						song_row_play_insts[idx] = niello.show(album.row_play, 0, {text = "Play", anchored = true})
+					}
 				}
 			}
 			if app.open_loaded && len(app.open_songs) == 0 {
@@ -417,6 +428,7 @@ screen_collection :: proc() {
 }
 
 song_row_insts: [dynamic]niello.Instance
+song_row_play_insts: [dynamic]niello.Instance // hover play buttons, parallel to song_row_insts
 
 album_meta_text :: proc() -> string {
 	if !app.open_loaded {
@@ -535,40 +547,131 @@ play_bar :: proc() {
 			i, open := niello.begin(pb.play, niello.key("play"))
 			instances.play = i
 			if open {
-				niello.show(pb.play_label, 0, {text = app.playing ? "Pause" : "Play"})
+				niello.show(pb.play_label, 0, {text = player.state == .Playing ? "Pause" : "Play"})
 			}
 		}
 		instances.next = transport_button("next", "Next")
 		if _, ok2 := niello.begin(pb.info); ok2 {
-			niello.show(pb.title)
-			niello.show(pb.artist)
+			if cur, okc := player_current(&player); okc {
+				niello.show(pb.title, 0, {text = cur.title})
+				niello.show(pb.artist, 0, {text = len(cur.artists_display) > 0 ? cur.artists_display : "—"})
+			} else {
+				niello.show(pb.title)
+				niello.show(pb.artist)
+			}
 		}
-		if _, ok3 := niello.begin(pb.seek_track); ok3 {
-			// The fill is a singleton unit, so its fraction is a
-			// unit write (With carries content, not size). It must
-			// ONLY be written when the percent actually changed:
-			// niello.set touches unconditionally, and a touch bumps
-			// the unit's visual generation, which pass F reads as
-			// damage, which makes frame_end report changed, which
-			// makes the glue frame again immediately — a
-			// self-perpetuating loop that framed this app at vsync
-			// even idle (470 declares in an idle trace, play off).
-			// Guarding the write breaks the loop: idle frames stop
-			// after the first unchanged one and the host blocks.
-			pct := app.position_secs / FAKE_TRACK_SECS
-			if !app.seek_pct_valid || pct != app.seek_pct {
-				app.seek_pct = pct
+		cur, has_cur := player_current(&player)
+		dur_ms: f64 = 0
+		if has_cur {
+			dur_ms = f64(cur.duration_ms)
+		}
+		// Seek (F2a): a press commits immediately, a drag previews
+		// the scrub position in the fill + time, the release commits.
+		// The fill is a singleton unit, so its fraction is a unit
+		// write (With carries content, not size). It must ONLY be
+		// written when the percent actually changed: niello.set
+		// touches unconditionally, and a touch bumps the unit's
+		// visual generation, which pass F reads as damage, which
+		// makes frame_end report changed, which makes the glue
+		// frame again immediately — a self-perpetuating loop that
+		// framed this app at vsync even idle (470 declares in an
+		// idle trace, play off). Guarding the write breaks the
+		// loop: idle frames stop after the first unchanged one
+		// and the host blocks.
+		if track, ok3 := niello.begin(pb.seek_track); ok3 {
+			instances.seek_track = track
+			if niello.pressed(track) {
+				player_seek_frac(&player, frac_from_pointer(track))
+			}
+			if niello.drag_completed(track) {
+				player_seek_frac(&player, frac_from_drag(track))
+			}
+			frac := seek_frac_for_bar()
+			if niello.dragging(track) {
+				frac = frac_from_drag(track)
+			}
+			if !app.seek_pct_valid || f32(frac) != app.seek_pct {
+				app.seek_pct = f32(frac)
 				app.seek_pct_valid = true
-				niello.set(pb.seek_fill, niello.Field.Size, niello.Size{niello.percent(pct), niello.percent(1)})
+				niello.set(pb.seek_fill, niello.Field.Size, niello.Size{niello.percent(f32(frac)), niello.percent(1)})
 			}
 			niello.show(pb.seek_fill)
 		}
-		niello.show(pb.time, 0, {text = fmt.tprintf("%s / %s", fmt_time(app.position_secs), fmt_time(FAKE_TRACK_SECS))})
-		if _, ok4 := niello.begin(pb.vol_track); ok4 {
+		pos_ms := player_position_ms(&player)
+		if niello.dragging(instances.seek_track) {
+			pos_ms = frac_from_drag(instances.seek_track) * dur_ms
+		}
+		niello.show(pb.time, 0, {text = fmt.tprintf("%s / %s", fmt_time(f32(pos_ms / 1000)), fmt_time(f32(dur_ms / 1000)))})
+		instances.shuffle = transport_button("shuffle", player.shuffle ? "Shuffle On" : "Shuffle")
+		instances.loop = transport_button("loop", loop_label(player.loop))
+		// Volume (F3b: the linear track stays; the radial knob is
+		// deferred): volume sets LIVE — unlike seek it costs no
+		// flush, so there is no preview/commit split. The fill
+		// write is guarded like the seek fill's.
+		if track, ok4 := niello.begin(pb.vol_track); ok4 {
+			instances.vol_track = track
+			if niello.pressed(track) {
+				player_set_volume(&player, int(frac_from_pointer(track) * 130 + 0.5))
+			}
+			if niello.dragging(track) {
+				player_set_volume(&player, int(frac_from_drag(track) * 130 + 0.5))
+			}
+			vfrac := f32(player.volume) / 130
+			if !app.vol_pct_valid || vfrac != app.vol_pct {
+				app.vol_pct = vfrac
+				app.vol_pct_valid = true
+				niello.set(pb.vol_fill, niello.Field.Size, niello.Size{niello.percent(vfrac), niello.percent(1)})
+			}
 			niello.show(pb.vol_fill)
 		}
+		niello.show(pb.vol_label, 0, {text = fmt.tprintf("%d%%", player.volume)})
+		instances.mute = transport_button("mute", player.muted ? "Unmute" : "Mute")
 		instances.queue = transport_button("queue", "Queue")
 	}
+}
+
+// The seek fill + time fraction: position over duration, 0 with
+// nothing playing or an unknown duration.
+seek_frac_for_bar :: proc() -> f64 {
+	cur, ok := player_current(&player)
+	if !ok || cur.duration_ms <= 0 {
+		return 0
+	}
+	return clamp(player_position_ms(&player) / f64(cur.duration_ms), 0, 1)
+}
+
+// Fraction of a bar track under the pointer (press) or under the
+// drag position (scrub), clamped to the track.
+frac_from_pointer :: proc(track: niello.Instance) -> f64 {
+	r, ok := niello.rect(track)
+	if !ok || r.size.x <= 0 {
+		return 0
+	}
+	p, pok := niello.mouse_position()
+	if !pok {
+		return 0
+	}
+	return clamp(f64(p.x - r.pos.x) / f64(r.size.x), 0, 1)
+}
+
+frac_from_drag :: proc(track: niello.Instance) -> f64 {
+	r, ok := niello.rect(track)
+	if !ok || r.size.x <= 0 {
+		return 0
+	}
+	return clamp(f64(niello.drag_pos(track).x) / f64(r.size.x), 0, 1)
+}
+
+loop_label :: proc(l: Loop_Mode) -> string {
+	switch l {
+	case .Normal:
+		return "Loop Off"
+	case .Track:
+		return "Loop Track"
+	case .Queue:
+		return "Loop Queue"
+	}
+	return "Loop Off"
 }
 
 transport_button :: proc(key: string, label: string) -> niello.Instance {
@@ -664,9 +767,34 @@ dispatch :: proc() {
 				break
 			}
 		}
+		// Hover play buttons (F1): append (+ play if the queue was
+		// empty). Clicking one also selects the row (the button is
+		// the row's child, so the row is on the click chain too) —
+		// harmless: the playing song gets selected.
+		for inst, idx in song_row_play_insts {
+			if idx < len(app.open_songs) && niello.clicked(inst) {
+				player_append(&player, entry_from_song(app.open_songs[idx]))
+				break
+			}
+		}
+	}
+	if niello.clicked(instances.prev) {
+		player_previous(&player)
 	}
 	if niello.clicked(instances.play) {
-		app.playing = !app.playing
+		player_toggle(&player)
+	}
+	if niello.clicked(instances.next) {
+		player_next(&player)
+	}
+	if niello.clicked(instances.shuffle) {
+		player_set_shuffle(&player, !player.shuffle)
+	}
+	if niello.clicked(instances.loop) {
+		player_cycle_loop(&player)
+	}
+	if niello.clicked(instances.mute) {
+		player_toggle_mute(&player)
 	}
 	if niello.clicked(instances.settings) {
 		app.settings_open = true

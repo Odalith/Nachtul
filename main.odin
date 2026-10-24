@@ -29,5 +29,12 @@ main :: proc() {
 	// the DB lives in the working directory (docs/schema-v2.md).
 	nachtul.start_library_load(ctx, ".")
 	defer nachtul.stop_library()
+	// The audio backend (step 4) lives on its own GLib thread; a
+	// missing .so fails loudly in audio_start and leaves the
+	// transport dead. Registered after stop_library, so this
+	// defer runs first — the audio thread is joined before the
+	// inbox is destroyed.
+	nachtul.audio_start()
+	defer nachtul.audio_stop()
 	niello_sdl.run(ctx, {title = "Nachtul", width = 1560, height = 900}, nachtul.declare)
 }

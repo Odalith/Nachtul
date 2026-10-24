@@ -561,6 +561,20 @@ Msg :: union {
 	Library_Loaded,
 	Collections_Page,
 	Collection_Songs,
+	Track_Ended,
+	Playback_Restarted,
+}
+
+// Audio backend events (step 4). gen is the player's generation at
+// send time; the drain drops events whose gen no longer matches —
+// the wall clock usually advances first, so a late EOF/restart for
+// the old track must not move the new one.
+Track_Ended :: struct {
+	gen: u64,
+}
+
+Playback_Restarted :: struct {
+	gen: u64,
 }
 
 Library_Loaded :: struct {
@@ -1054,6 +1068,10 @@ drain_library_msgs :: proc() {
 				free_collection_row(&col)
 				free_song_rows(m.rows)
 			}
+		case Track_Ended:
+			player_on_track_ended(&player, m.gen)
+		case Playback_Restarted:
+			player_on_restart(&player, m.gen)
 		}
 	}
 	clear(&drain_scratch)
