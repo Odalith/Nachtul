@@ -39,3 +39,21 @@ Expects a sibling checkout of NielloUI:
 Window: 1560×900, three screens (Now Playing / Library / Composer),
 a working play/pause position synthesis, and a settings popup.
 Library data arrives in step 2+; the Sync button says so.
+
+## Profiling (Spall)
+
+Off by default. To record a trace, run with the environment variable
+set (no rebuild needed) and open the resulting file in the free web
+viewer at https://gravitymoth.com/spall/spall-web.html:
+
+    NACHTUL_SPALL=1 odin run .
+    NACHTUL_SPALL_FILE=/tmp/nachtul.spall NACHTUL_SPALL=1 odin run .
+
+The trace has two threads — `main` (one `declare` event per frame,
+with `screen_library`, `screen_collection`, and `play_bar` inside it)
+and `library` (one event per worker job: `library_load`,
+`collections_page`, `songs_from_collection`, `import_v1`). Close the
+window to flush and close the file; `*.spall` is gitignored. The
+implementation is `src/prof.odin`, built on Odin's `core:prof/spall` —
+no new dependency, and no engine instrumentation: this traces the
+app's boundaries, not every procedure in the program.

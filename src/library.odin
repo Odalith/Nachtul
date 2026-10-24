@@ -661,6 +661,12 @@ stop_library :: proc() {
 }
 
 lib_worker :: proc(_: rawptr) {
+	// Both are no-ops when profiling is off — and they must sit at
+	// proc top level, NOT inside an if block: a defer inside a block
+	// runs at the end of that block, which would flush the worker's
+	// buffer right after the name event and silence every job event.
+	prof_init_thread("library")
+	defer prof_shutdown_thread()
 	db_path := fmt.tprintf("%s/Nachtul.db", load_dir)
 	v1_path := fmt.tprintf("%s/NachtulV1.db", load_dir)
 	fresh := !os.exists(db_path)
@@ -674,7 +680,10 @@ lib_worker :: proc(_: rawptr) {
 	imported := false
 	import_songs := 0
 	if fresh && os.exists(v1_path) {
-		if res, iok := import_v1(db, v1_path); iok {
+		prof_begin("import_v1")
+		res, iok := import_v1(db, v1_path)
+		prof_end()
+		if iok {
 			imported = true
 			import_songs = res.songs
 		}
@@ -684,20 +693,32 @@ lib_worker :: proc(_: rawptr) {
 		job := pop_job()
 		switch j in job {
 		case Job_Load:
-			msg: Library_Loaded
-			msg.folders = folders_list(db)
-			msg.folder_count, msg.collection_count, msg.song_count = library_counts(db)
-			msg.imported = imported
-			msg.import_songs = import_songs
-			inbox.send(&box, msg)
+			{
+				prof_begin("library_load")
+				msg: Library_Loaded
+				msg.folders = folders_list(db)
+				msg.folder_count, msg.collection_count, msg.song_count = library_counts(db)
+				msg.imported = imported
+				msg.import_songs = import_songs
+				inbox.send(&box, msg)
+				prof_end()
+			}
 		case Job_Collections:
-			rows, total := collections_page(db, j.query)
-			inbox.send(&box, Collections_Page{query = j.query, gen = data_generation, total = total, rows = rows})
+			{
+				prof_begin("collections_page")
+				rows, total := collections_page(db, j.query)
+				inbox.send(&box, Collections_Page{query = j.query, gen = data_generation, total = total, rows = rows})
+				prof_end()
+			}
 		case Job_Songs:
-			collection_touch_opened(db, j.collection_uuid)
-			row, found := collection_by_uuid(db, j.collection_uuid)
-			if found {
-				inbox.send(&box, Collection_Songs{collection = row, rows = songs_from_collection(db, j.collection_uuid)})
+			{
+				prof_begin("songs_from_collection")
+				collection_touch_opened(db, j.collection_uuid)
+				row, found := collection_by_uuid(db, j.collection_uuid)
+				if found {
+					inbox.send(&box, Collection_Songs{collection = row, rows = songs_from_collection(db, j.collection_uuid)})
+				}
+				prof_end()
 			}
 		case Job_Quit:
 			return

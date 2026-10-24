@@ -145,6 +145,8 @@ FAKE_TRACK_SECS :: 213 // 3:33 — placeholder until step 4
 // The glue entry point. One drain point will land here in step 2
 // (the one-inbox rule); step 1 has no producers yet.
 declare :: proc() {
+	prof_begin("declare")
+	defer prof_end()
 	// The one drain point: producers (the library loader today, the
 	// audio backend and scanner later) land here, before anything
 	// projects state.
@@ -245,6 +247,8 @@ SECTION_DEFS := [11]struct {
 }
 
 screen_library :: proc() {
+	prof_begin("screen_library")
+	defer prof_end()
 	if app.open_uuid != "" {
 		screen_collection()
 		return
@@ -372,6 +376,8 @@ pager_pages :: proc() -> int {
 }
 
 screen_collection :: proc() {
+	prof_begin("screen_collection")
+	defer prof_end()
 	if _, ok := niello.begin(lib.content, niello.key("collection")); ok {
 		instances.back = nav_button("back", "Back", false)
 		if _, okh := niello.begin(album.header); okh {
@@ -503,6 +509,8 @@ tray :: proc(key: string, title: string) {
 // ---- playback bar ---------------------------------------------------------------
 
 play_bar :: proc() {
+	prof_begin("play_bar")
+	defer prof_end()
 	if _, ok := niello.begin(pb.bar); ok {
 		instances.prev = transport_button("prev", "Prev")
 		{

@@ -13,3 +13,6 @@ Nachtul.db
 
 # Build output
 /build/
+
+# Profiling traces (see src/prof.odin) — large, regenerated per run
+*.spall
