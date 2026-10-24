@@ -41,6 +41,10 @@ App :: struct {
 	seek_pct_valid:   bool,
 	vol_pct:          f32, // last fraction written to pb.vol_fill
 	vol_pct_valid:    bool,
+	// Now Playing art (see update_now_playing_art).
+	np_art:          niello.Image, // resolved cover (owned when np_art_owned)
+	np_art_owned:    bool,
+	np_uuid:         string, // uuid the NP art was resolved for (clone)
 	sync_status:      string,
 	// Library state, landed by the loader through the inbox (step 2).
 	loaded:           bool,
@@ -223,11 +227,56 @@ nav_button :: proc(key: string, label: string, selected: bool, disabled: bool = 
 
 // ---- screens ------------------------------------------------------------------
 
+// Now Playing follows the player: title + artist from the
+// current queue entry, and the cover resolved on song change
+// (coverArt path, then the file's embedded image — see
+// coverart.odin). Resolving does file I/O + a decode, so it
+// runs only when the current song's uuid changed, not per frame.
+update_now_playing_art :: proc() {
+	cur, ok := player_current(&player)
+	uuid := ""
+	if ok {
+		uuid = cur.uuid
+	}
+	if uuid == app.np_uuid {
+		return
+	}
+	if app.np_art_owned && app.np_art != niello.NO_IMAGE {
+		niello.image_release(app.np_art)
+	}
+	app.np_art = niello.NO_IMAGE
+	app.np_art_owned = false
+	if len(app.np_uuid) > 0 {
+		delete(app.np_uuid)
+	}
+	if len(uuid) > 0 {
+		app.np_uuid = strings.clone(uuid)
+	} else {
+		app.np_uuid = ""
+	}
+	if ok {
+		if img, iok := resolve_np_art(cur^); iok {
+			app.np_art = img
+			app.np_art_owned = true
+		}
+	}
+}
+
 screen_now_playing :: proc() {
+	update_now_playing_art()
 	if _, ok := niello.begin(np.col); ok {
-		niello.show(np.cover)
-		niello.show(np.title)
-		niello.show(np.artist)
+		if app.np_art != niello.NO_IMAGE {
+			niello.show(np.cover, 0, {image = app.np_art})
+		} else {
+			niello.show(np.cover)
+		}
+		if cur, okc := player_current(&player); okc {
+			niello.show(np.title, 0, {text = cur.title})
+			niello.show(np.artist, 0, {text = len(cur.artists_display) > 0 ? cur.artists_display : "—"})
+		} else {
+			niello.show(np.title)
+			niello.show(np.artist)
+		}
 	}
 }
 
@@ -565,8 +614,17 @@ play_bar :: proc() {
 		if has_cur {
 			dur_ms = f64(cur.duration_ms)
 		}
-		// Seek (F2a): a press commits immediately, a drag previews
-		// the scrub position in the fill + time, the release commits.
+		// Seek (F2a, corrected): the gesture commits exactly once,
+		// on release. pressed() is NOT a press event — it stays
+		// true for the whole hold (capture), so seeking on it
+		// fired a backend flush seek EVERY FRAME of a drag: the
+		// pipeline never settled, audio stopped at drag start,
+		// and the release seek landed on a wedged backend. A
+		// drag's release seeks to the release position; a plain
+		// click's release seeks to the click position. During a
+		// drag only the preview moves. (A click's seek lands on
+		// release instead of press — the one observable F2a
+		// deviation, and it is what makes drags work at all.)
 		// The fill is a singleton unit, so its fraction is a unit
 		// write (With carries content, not size). It must ONLY be
 		// written when the percent actually changed: niello.set
@@ -580,11 +638,10 @@ play_bar :: proc() {
 		// and the host blocks.
 		if track, ok3 := niello.begin(pb.seek_track); ok3 {
 			instances.seek_track = track
-			if niello.pressed(track) {
-				player_seek_frac(&player, frac_from_pointer(track))
-			}
 			if niello.drag_completed(track) {
 				player_seek_frac(&player, frac_from_drag(track))
+			} else if niello.clicked(track) {
+				player_seek_frac(&player, frac_from_pointer(track))
 			}
 			frac := seek_frac_for_bar()
 			if niello.dragging(track) {
@@ -606,15 +663,19 @@ play_bar :: proc() {
 		instances.loop = transport_button("loop", loop_label(player.loop))
 		// Volume (F3b: the linear track stays; the radial knob is
 		// deferred): volume sets LIVE — unlike seek it costs no
-		// flush, so there is no preview/commit split. The fill
-		// write is guarded like the seek fill's.
+		// flush, so there is no preview/commit split. The live
+		// set rides dragging(); a plain click sets on release.
+		// (pressed() was the same held-frame bug as seek —
+		// harmless for volume, since sets are cheap and
+		// idempotent, but the click/drag split is the correct
+		// shape and costs nothing.) The fill write is guarded
+		// like the seek fill's.
 		if track, ok4 := niello.begin(pb.vol_track); ok4 {
 			instances.vol_track = track
-			if niello.pressed(track) {
-				player_set_volume(&player, int(frac_from_pointer(track) * 130 + 0.5))
-			}
 			if niello.dragging(track) {
 				player_set_volume(&player, int(frac_from_drag(track) * 130 + 0.5))
+			} else if niello.clicked(track) {
+				player_set_volume(&player, int(frac_from_pointer(track) * 130 + 0.5))
 			}
 			vfrac := f32(player.volume) / 130
 			if !app.vol_pct_valid || vfrac != app.vol_pct {

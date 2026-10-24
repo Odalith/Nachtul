@@ -10,12 +10,25 @@ import nachtul "../src"
 
 // Borrowed literals: player_append/replace clone everything they
 // keep, so the passed struct never owns its strings.
-fake_entry :: proc(uuid: string = "song-1", location: string = "/music/song-1.mp3", duration_ms: i64 = 200_000) -> nachtul.Play_Entry {
-	return nachtul.Play_Entry{uuid = uuid, title = "Title", artists = `["Artist"]`, artists_display = "Artist", location = location, duration_ms = duration_ms}
+fake_entry :: proc(uuid: string = "song-1", location: string = "/music/song-1.mp3", duration_ms: i64 = 200_000, cover_art: string = "") -> nachtul.Play_Entry {
+	return nachtul.Play_Entry{uuid = uuid, title = "Title", artists = `["Artist"]`, artists_display = "Artist", location = location, duration_ms = duration_ms, cover_art = cover_art}
 }
 
 reset_player :: proc() {
 	nachtul.player_reset()
+}
+
+// A queue entry carries the song's coverArt path (the Now
+// Playing screen resolves it); the clone + free path must carry
+// it too, or the art would silently drop on shuffle/queue edits.
+@(test)
+test_append_clones_cover_art :: proc(t: ^testing.T) {
+	reset_player()
+	defer reset_player()
+	nachtul.player_append(&nachtul.player, fake_entry("song-9", "/music/9.mp3", 200_000, "/art/9.png"))
+	cur, ok := nachtul.player_current(&nachtul.player)
+	testing.expect(t, ok, "a current song exists")
+	testing.expect(t, cur.cover_art == "/art/9.png", "queue entry carries the song's coverArt")
 }
 
 @(test)

@@ -67,6 +67,7 @@ Play_Entry :: struct {
 	artists_display: string, // joined once, for the bar
 	location:        string, // absolute file path, as stored
 	duration_ms:     i64,
+	cover_art:       string, // Songs.coverArt path; "" when unset
 }
 
 Player :: struct {
@@ -99,6 +100,7 @@ clone_entry :: proc(e: Play_Entry) -> Play_Entry {
 		artists_display = strings.clone(e.artists_display),
 		location        = strings.clone(e.location),
 		duration_ms     = e.duration_ms,
+		cover_art       = strings.clone(e.cover_art),
 	}
 }
 
@@ -117,6 +119,9 @@ free_entry :: proc(e: ^Play_Entry) {
 	}
 	if len(e.location) > 0 {
 		delete(e.location)
+	}
+	if len(e.cover_art) > 0 {
+		delete(e.cover_art)
 	}
 	e^ = {}
 }
@@ -143,6 +148,7 @@ entry_from_song :: proc(s: Song_Row) -> Play_Entry {
 		artists_display = artists_join(s.artists),
 		location        = strings.clone(s.location),
 		duration_ms     = s.duration,
+		cover_art       = strings.clone(s.cover_art),
 	}
 }
 

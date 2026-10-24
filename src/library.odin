@@ -42,14 +42,15 @@ Collection_Row :: struct {
 }
 
 Song_Row :: struct {
-	uuid:     string,
-	title:    string,
-	artists:  string, // JSON array, as stored
-	location: string,
+	uuid:      string,
+	title:     string,
+	artists:   string, // JSON array, as stored
+	location:  string,
 	file_name: string,
-	duration: i64, // ms
-	size:     i64, // bytes
-	position: i64, // within the queried collection
+	duration:  i64, // ms
+	size:      i64, // bytes
+	position:  i64, // within the queried collection
+	cover_art: string, // Songs.coverArt path; "" when unset
 }
 
 // The data generation (D1): bumped by every write through this
@@ -172,7 +173,7 @@ collection_touch_opened :: proc(db: Db, uuid: string) {
 
 songs_from_collection :: proc(db: Db, collection_uuid: string) -> [dynamic]Song_Row {
 	stmt, ok := stmt_prepare(db, `
-		SELECT s.uuid, s.title, s.artists, s.location, s.fileName, s.duration, s.sizeInBytes, cs.position
+		SELECT s.uuid, s.title, s.artists, s.location, s.fileName, s.duration, s.sizeInBytes, cs.position, s.coverArt
 		FROM CollectionSongs cs JOIN Songs s ON s.uuid = cs.songUuid_fk
 		WHERE cs.collectionUuid_fk = ?1
 		ORDER BY cs.position, s.title;`)
@@ -192,6 +193,7 @@ songs_from_collection :: proc(db: Db, collection_uuid: string) -> [dynamic]Song_
 			duration = col_i64(stmt, 5),
 			size = col_i64(stmt, 6),
 			position = col_i64(stmt, 7),
+			cover_art = col_text(stmt, 8),
 		})
 	}
 	return out
@@ -202,7 +204,7 @@ songs_from_collection :: proc(db: Db, collection_uuid: string) -> [dynamic]Song_
 // token JSON.
 songs_search :: proc(db: Db, term: string, limit: int) -> []Song_Row {
 	stmt, ok := stmt_prepare(db, `
-		SELECT uuid, title, artists, location, fileName, duration, sizeInBytes, 0
+		SELECT uuid, title, artists, location, fileName, duration, sizeInBytes, 0, coverArt
 		FROM Songs
 		WHERE searchTokens LIKE ?1
 		ORDER BY title LIMIT ?2;`)
@@ -223,6 +225,7 @@ songs_search :: proc(db: Db, term: string, limit: int) -> []Song_Row {
 			file_name = col_text(stmt, 4),
 			duration = col_i64(stmt, 5),
 			size = col_i64(stmt, 6),
+			cover_art = col_text(stmt, 8),
 		})
 	}
 	return out[:]
@@ -977,6 +980,9 @@ free_song_rows :: proc(rows: [dynamic]Song_Row) {
         }
         if len(row.file_name) > 0 {
             delete(row.file_name)
+        }
+        if len(row.cover_art) > 0 {
+            delete(row.cover_art)
         }
     }
     delete(rows)
