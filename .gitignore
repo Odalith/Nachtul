@@ -1,0 +1,15 @@
+# Native binaries are never committed (same rule as NielloUI):
+# third_party/native/<platform>/ is populated by tools/fetch-native.sh
+# or by dropping in a local build. Headers under include/ ARE committed.
+third_party/native/**/*.so
+third_party/native/**/*.dll
+third_party/native/**/*.dylib
+third_party/native/**/*.a
+third_party/native/**/*.lib
+
+# App data
+Nachtul.db
+*.log
+
+# Build output
+/build/
