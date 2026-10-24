@@ -9,7 +9,11 @@ adopts (database as source of truth; a search is a SQL query).
 
 The port proceeds in steps (skeleton + theme → data layer → library
 screens → playback → Composer → scanner → tail), each ending with a
-runnable app. Step 1 (skeleton + night theme) is what's here.
+runnable app. Steps 1 (skeleton + night theme) and 2 (schema V2 +
+data layer — see `docs/schema-v2.md`) are what's here: on startup
+the app creates `Nachtul.db` in the working directory, imports a
+`NachtulV1.db` sitting beside it if this is the first run, and the
+Settings popup lists the library's real folders.
 
 ## Layout
 

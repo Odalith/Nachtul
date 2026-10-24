@@ -87,6 +87,7 @@ Playback :: struct {
 Popup :: struct {
 	panel: niello.Unit,
 	title: niello.Unit,
+	row:   niello.Unit, // a text row inside the popup (folder paths)
 }
 
 // Shared selection variants: per-instance overlays (With.variant) —
@@ -253,6 +254,7 @@ init_theme :: proc() {
 		padding = [4]u16{20, 18, 20, 18}, gap = 12,
 	})
 	niello.mint(&pop.title, niello.NO_UNIT, {font_size = 17, font_color = COL_TEXT, text = "Settings"})
+	niello.mint(&pop.row, niello.NO_UNIT, {font_size = 13, font_color = COL_TEXT})
 
 	// Shared selection variants
 	niello.mint(&common.sel, niello.NO_UNIT, {color = COL_PANEL2, corner_radius = 8})

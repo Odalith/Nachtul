@@ -33,12 +33,18 @@ Section :: enum {
 }
 
 App :: struct {
-	screen:         Screen,
-	section:        Section,
-	playing:        bool,
-	settings_open:  bool,
-	position_secs:  f32, // synthesized playback position (step 4 gets a real track)
-	sync_status:    string,
+	screen:           Screen,
+	section:          Section,
+	playing:          bool,
+	settings_open:    bool,
+	position_secs:    f32, // synthesized playback position (step 4 gets a real track)
+	sync_status:      string,
+	// Library state, landed by the loader through the inbox (step 2).
+	loaded:           bool,
+	folders:          []Folder,
+	folder_count:     int,
+	collection_count: int,
+	song_count:       int,
 }
 
 app := App{sync_status = "Ready"}
@@ -64,6 +70,11 @@ FAKE_TRACK_SECS :: 213 // 3:33 — placeholder until step 4
 // The glue entry point. One drain point will land here in step 2
 // (the one-inbox rule); step 1 has no producers yet.
 declare :: proc() {
+	// The one drain point: producers (the library loader today, the
+	// audio backend and scanner later) land here, before anything
+	// projects state.
+	drain_library_msgs()
+
 	// Position synthesis, frame-side (the brief §1 pattern): while
 	// playing, re-arm a 250 ms wake and advance the position. Idle
 	// with nothing playing, the window sleeps.
@@ -174,9 +185,13 @@ screen_library :: proc() {
 			}
 		}
 		if _, ok3 := niello.begin(lib.panel); ok3 {
-			niello.show(lib.placeholder, 0, {
-				text = "No collections yet — the library arrives in step 3.\nFolders and sync land in steps 2 and 6.",
-			})
+			if app.loaded {
+				niello.show(lib.placeholder, 0, {
+					text = fmt.tprintf("%d songs · %d collections · %d folders\nThe library browser arrives in step 3.", app.song_count, app.collection_count, app.folder_count),
+				})
+			} else {
+				niello.show(lib.placeholder, 0, {text = "Loading library…"})
+			}
 		}
 	}
 }
@@ -250,7 +265,18 @@ settings_popup :: proc() {
 	instances.popup = pi
 	if open {
 		niello.show(pop.title)
-		niello.show(lib.placeholder, 0, {text = "Music folders live here in step 6."})
+		niello.show(lib.placeholder, 0, {text = "Music Folders"})
+		if !app.loaded {
+			niello.show(pop.row, 0, {text = "Loading…"})
+		} else if len(app.folders) == 0 {
+			niello.show(pop.row, 0, {text = "No folders yet — adding arrives with the picker in step 6."})
+		} else {
+			// Folder rows are plain text this step; the list becomes a
+			// scrollable, editable list in step 6.
+			for folder, i in app.folders {
+				niello.show(pop.row, niello.key_int(i), {text = folder.path})
+			}
+		}
 		instances.popup_close = nav_button("popup_close", "Close", false)
 	}
 }
