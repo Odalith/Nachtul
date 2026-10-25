@@ -34,6 +34,13 @@ teardown :: proc() {
 	if len(nachtul.app.selected_song) > 0 {
 		delete(nachtul.app.selected_song)
 	}
+	if len(nachtul.app.np_uuid) > 0 {
+		delete(nachtul.app.np_uuid)
+	}
+	if nachtul.app.np_art_owned && nachtul.app.np_art != niello.NO_IMAGE {
+		niello.image_release(nachtul.app.np_art)
+	}
+	nachtul.player_reset()
 	nachtul.app = nachtul.App{}
 	niello.test_teardown()
 }
@@ -109,17 +116,102 @@ test_play_toggle_and_position_synthesis :: proc(t: ^testing.T) {
 	setup()
 	defer teardown()
 	settle()
-	testing.expect(t, !nachtul.app.playing, "starts paused")
+	testing.expect(t, nachtul.player.state == .Stopped, "starts stopped")
+	// Appending to an empty queue starts playing (F1).
+	nachtul.player_append(&nachtul.player, fake_entry())
+	testing.expect(t, nachtul.player.state == .Playing, "append to an empty queue starts playing")
 	click(nachtul.instances.play)
-	testing.expect(t, nachtul.app.playing, "play click toggles playing")
-	before := nachtul.app.position_secs
+	testing.expect(t, nachtul.player.state == .Paused, "play click pauses")
+	before := nachtul.player_position_ms(&nachtul.player)
 	settle(4)
-	testing.expect(t, nachtul.app.position_secs > before, "position synthesizes forward while playing")
+	testing.expect(t, nachtul.player_position_ms(&nachtul.player) == before, "position holds while paused")
 	click(nachtul.instances.play)
-	testing.expect(t, !nachtul.app.playing, "second click pauses")
-	frozen := nachtul.app.position_secs
+	testing.expect(t, nachtul.player.state == .Playing, "second click resumes")
 	settle(4)
-	testing.expect(t, nachtul.app.position_secs == frozen, "position holds while paused")
+	testing.expect(t, nachtul.player_position_ms(&nachtul.player) > before, "position advances while playing")
+}
+
+// Regression for the step-4 drag bugs: pressed() stays true for
+// the whole hold (capture), so the old seek-on-pressed fired a
+// backend flush seek EVERY FRAME of a drag — audio stopped at
+// drag start and the release seek landed on a wedged backend.
+// A press, a held drag, and only then a release must produce
+// exactly one seek, at the release position.
+@(test)
+test_seek_drag_seeks_once_on_release :: proc(t: ^testing.T) {
+	setup()
+	defer teardown()
+	settle()
+	nachtul.player_append(&nachtul.player, fake_entry())
+	settle()
+	r, rok := niello.rect(nachtul.instances.seek_track)
+	if !rok {
+		testing.expect(t, false, "seek track has a rect")
+		return
+	}
+	start := r.pos + r.size * 0.5
+	end := niello.Vec2{r.pos[0] + r.size[0] * 0.75, r.pos[1] + r.size[1] * 0.5}
+	mid := start + (end - start) * 0.5
+	press := idle()
+	press.mouse = start
+	press.mouse_valid = true
+	press.buttons_pressed = {.Left}
+	press.buttons_down = {.Left}
+	step(press)
+	testing.expect(t, !nachtul.player.seeking, "press alone does not seek")
+	testing.expect(t, nachtul.player.pos_base_ms == 0, "press alone leaves position untouched")
+	// Held moves: the first already crosses the 4 DIP threshold,
+	// so a drag is active — but the preview must not seek.
+	moves := []niello.Vec2{mid, end}
+	for pt in moves {
+		mv := idle()
+		mv.mouse = pt
+		mv.mouse_valid = true
+		mv.buttons_down = {.Left}
+		step(mv)
+	}
+	testing.expect(t, !nachtul.player.seeking, "drag preview does not seek")
+	testing.expect(t, nachtul.player.pos_base_ms == 0, "drag preview leaves position untouched")
+	rel := idle()
+	rel.mouse = end
+	rel.mouse_valid = true
+	rel.buttons_released = {.Left}
+	step(rel)
+	testing.expect(t, nachtul.player.seeking, "release commits the seek")
+	testing.expect(t, nachtul.player.pos_base_ms > 140_000 && nachtul.player.pos_base_ms < 160_000, "release seeks to ~0.75 of duration")
+}
+
+// A plain click on the seek track seeks on release, to the click
+// position (the press frame itself seeks nothing).
+@(test)
+test_seek_click_seeks_on_release :: proc(t: ^testing.T) {
+	setup()
+	defer teardown()
+	settle()
+	nachtul.player_append(&nachtul.player, fake_entry())
+	settle()
+	click(nachtul.instances.seek_track)
+	testing.expect(t, nachtul.player.seeking, "click commits the seek")
+	testing.expect(t, nachtul.player.pos_base_ms > 90_000 && nachtul.player.pos_base_ms < 110_000, "click seeks to ~0.5 of duration")
+}
+
+// Now Playing follows the player: the tracked song changes when
+// the queue advances, and a song with no art file leaves the
+// cover blank rather than stale.
+@(test)
+test_now_playing_tracks_current_song :: proc(t: ^testing.T) {
+	setup()
+	defer teardown()
+	settle()
+	testing.expect(t, nachtul.app.np_uuid == "", "no song, no NP uuid")
+	nachtul.player_append(&nachtul.player, fake_entry("song-1", "/music/1.mp3"))
+	settle()
+	testing.expect(t, nachtul.app.np_uuid == "song-1", "NP follows the first song")
+	testing.expect(t, nachtul.app.np_art == niello.NO_IMAGE, "no art file, blank cover")
+	nachtul.player_append(&nachtul.player, fake_entry("song-2", "/music/2.mp3"))
+	nachtul.player_next(&nachtul.player)
+	settle()
+	testing.expect(t, nachtul.app.np_uuid == "song-2", "NP follows the next song")
 }
 
 @(test)
