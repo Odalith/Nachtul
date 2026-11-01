@@ -133,6 +133,7 @@ Instances :: struct {
 	sort_items:   [len(SORT_DEFS)]niello.Instance,
 	page_prev:    niello.Instance,
 	page_next:    niello.Instance,
+	mem_diag:     niello.Instance, // TEMPORARY diagnostic button
 	cards:        [PAGE_SIZE]niello.Instance,
 	back:         niello.Instance,
 	song_first:   niello.Instance,
@@ -157,6 +158,7 @@ declare :: proc() {
 	// audio backend and scanner later) land here, before anything
 	// projects state.
 	drain_library_msgs()
+	memdiag_step() // TEMPORARY diagnostic: runs only while a run is active
 
 	// Playback position + advance (step 4): while playing, re-arm
 	// a 1 s wake (his ruling — the bar updates at 1 Hz, and the
@@ -371,6 +373,7 @@ screen_library :: proc() {
 				instances.page_prev = nav_button("page_prev", "Prev", false, app.page <= 0)
 				niello.show(lib.pager_label, 0, {text = fmt.tprintf("Page %d of %d · %d collections", app.page + 1, pager_pages(), app.lib_total)})
 				instances.page_next = nav_button("page_next", "Next", false, app.page + 1 >= pager_pages())
+				instances.mem_diag = nav_button("mem_diag", "Mem", false, memdiag_active) // TEMPORARY diagnostic
 			}
 		}
 	}
@@ -805,6 +808,9 @@ dispatch :: proc() {
 	}
 	if niello.clicked(instances.page_next) && app.page + 1 < pager_pages() {
 		app.page += 1
+	}
+	if niello.clicked(instances.mem_diag) && !memdiag_active { // TEMPORARY diagnostic
+		memdiag_start()
 	}
 	if app.open_uuid == "" {
 		for _, idx in app.lib_rows {

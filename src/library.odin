@@ -1051,6 +1051,7 @@ drain_library_msgs :: proc() {
 				app.lib_total = m.total
 				app.lib_loaded = true
 				apply_page_thumbs(m.rows)
+				memdiag_pages_applied += 1 // TEMPORARY diagnostic hook
 			} else {
 				free_collection_rows(m.rows)
 			}
