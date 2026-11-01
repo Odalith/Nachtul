@@ -134,6 +134,7 @@ Instances :: struct {
 	page_prev:    niello.Instance,
 	page_next:    niello.Instance,
 	mem_diag:     niello.Instance, // TEMPORARY diagnostic button
+	mem_soak:     niello.Instance, // TEMPORARY diagnostic button
 	cards:        [PAGE_SIZE]niello.Instance,
 	back:         niello.Instance,
 	song_first:   niello.Instance,
@@ -374,6 +375,7 @@ screen_library :: proc() {
 				niello.show(lib.pager_label, 0, {text = fmt.tprintf("Page %d of %d · %d collections", app.page + 1, pager_pages(), app.lib_total)})
 				instances.page_next = nav_button("page_next", "Next", false, app.page + 1 >= pager_pages())
 				instances.mem_diag = nav_button("mem_diag", "Mem", false, memdiag_active) // TEMPORARY diagnostic
+				instances.mem_soak = nav_button("mem_soak", "Soak", false, memdiag_active && !memdiag_soaking) // TEMPORARY diagnostic: stays enabled during a soak so it can cancel it
 			}
 		}
 	}
@@ -811,6 +813,13 @@ dispatch :: proc() {
 	}
 	if niello.clicked(instances.mem_diag) && !memdiag_active { // TEMPORARY diagnostic
 		memdiag_start()
+	}
+	if niello.clicked(instances.mem_soak) { // TEMPORARY diagnostic
+		if memdiag_soaking {
+			memdiag_soak_cancel()
+		} else if !memdiag_active {
+			memdiag_soak_start()
+		}
 	}
 	if app.open_uuid == "" {
 		for _, idx in app.lib_rows {
